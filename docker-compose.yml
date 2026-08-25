@@ -1,0 +1,26 @@
+# Local PostgreSQL for development. Production-grade settings are out of scope:
+# this exists so the app talks to a real database instead of SQLite.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rail-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${RAIL_RAG_DB_NAME:-rail_rag}
+      POSTGRES_USER: ${RAIL_RAG_DB_USER:-rail_rag}
+      POSTGRES_PASSWORD: ${RAIL_RAG_DB_PASSWORD:?RAIL_RAG_DB_PASSWORD must be set in .env}
+    ports:      
+      - "${RAIL_RAG_DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${RAIL_RAG_DB_USER:-rail_rag} -d ${RAIL_RAG_DB_NAME:-rail_rag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
+    name: rail-rag-postgres-data
