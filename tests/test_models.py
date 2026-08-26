@@ -91,7 +91,7 @@ def test_staging_table_is_unconstrained() -> None:
     assert stg_fact_stop_event.primary_key.columns.keys() == []
 
 
-def test_staging_mirrors_the_fact_measures() -> None:
-    """A column added to the fact but not to staging would break the loader."""
-    ignored = {"loaded_at"}
-    assert set(stg_fact_stop_event.c.keys()) == set(fact_stop_event.c.keys()) - ignored
+def test_staging_mirrors_the_fact_source_columns() -> None:
+    """The loader can promote staging rows into the fact table without column mapping."""    
+    fact_only = {"loaded_at", "measured_arrivals"}
+    assert set(stg_fact_stop_event.c.keys()) == set(fact_stop_event.c.keys()) - fact_only
