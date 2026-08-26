@@ -19,6 +19,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1", 
+    "pyarrow>=16",
     "pyyaml>=6.0",    
 ]
 
@@ -50,3 +51,7 @@ testpaths = ["tests"]
 markers = [
   "integration: requires a running PostgreSQL instance (docker compose up -d)",
 ]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow.*"]
+ignore_missing_imports = true
