@@ -87,3 +87,14 @@ def clean_schema(postgres_engine: Engine) -> Iterator[Engine]:
     finally:
         drop_schema(postgres_engine)
 
+
+@pytest.fixture(scope="session")
+def gold_parquet_dir() -> Path:
+    """Directory of the four real Gold samples, converted from CSV to Parquet.
+ 
+    These are a faithful mirror of Betty's manual extraction: same 100 rows, same
+    nulls, native Parquet types. They are three independent cuts, so fact keys may
+    not resolve against the dimensions here - use the synthetic generator for a
+    referentially coherent set.
+    """
+    return Path(__file__).resolve().parent / "fixtures" / "gold_parquet"
