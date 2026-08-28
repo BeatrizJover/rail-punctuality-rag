@@ -41,12 +41,12 @@ def _cmd_db_init() -> int:
     return EXIT_OK
 
 
-def _cmd_db_drop(confirmed: bool) -> int:
+def _cmd_db_drop(confirmed: bool, include_ops: bool) -> int:
     """Drop the Gold schema, guarded by an explicit flag."""
     if not confirmed:
         logger.error("Refusing to drop the schema without --yes.")
         return EXIT_ERROR
-    drop_schema(create_db_engine(get_settings()))
+    drop_schema(create_db_engine(get_settings()), include_ops=include_ops)
     logger.info("Done.")
     return EXIT_OK
 
@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("db-init", help="create the Gold schema")
     drop = sub.add_parser("db-drop", help="drop the Gold schema (destructive)")
     drop.add_argument("--yes", action="store_true", help="confirm the destructive operation")
+    drop.add_argument("--include-ops",action="store_true",help="also drop the load history in ops (kept by default)")
     return parser
 
 
@@ -72,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_db_ping()
         if args.command == "db-init":
             return _cmd_db_init()
-        return _cmd_db_drop(confirmed=bool(args.yes))
+        return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)
         return EXIT_ERROR
