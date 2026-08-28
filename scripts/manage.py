@@ -60,7 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("db-init", help="create the Gold schema")
     drop = sub.add_parser("db-drop", help="drop the Gold schema (destructive)")
     drop.add_argument("--yes", action="store_true", help="confirm the destructive operation")
-    drop.add_argument("--include-ops",action="store_true",help="also drop the load history in ops (kept by default)")
+    drop.add_argument(
+        "--include-ops",
+        action="store_true",
+        help="also drop the load history in ops (kept by default)",
+    )
     return parser
 
 
