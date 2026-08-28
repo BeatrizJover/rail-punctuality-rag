@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -100,3 +101,14 @@ def gold_parquet_dir() -> Path:
     referentially coherent set.
     """
     return Path(__file__).resolve().parent / "fixtures" / "gold_parquet"
+
+
+@pytest.fixture(scope="session")
+def synthetic_gold_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A referentially coherent Gold export: every fact key resolves to a dimension."""
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+    from generate_sample_gold import generate
+
+    out_dir = tmp_path_factory.mktemp("synthetic_gold")
+    generate(out_dir, stations=20, days=3)
+    return out_dir
