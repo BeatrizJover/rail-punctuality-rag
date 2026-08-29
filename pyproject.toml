@@ -30,6 +30,7 @@ dev = [
     "pytest>=8.0",
     "types-pyyaml>=6.0",
 ]
+gemini = ["google-genai"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rail_rag"]
@@ -54,4 +55,8 @@ markers = [
 
 [[tool.mypy.overrides]]
 module = ["pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["google.genai.*"]
 ignore_missing_imports = true
