@@ -5,6 +5,8 @@ Usage:
  python scripts/manage.py db-drop --yes
  python scripts/manage.py load-dims --source-dir DIR
  python scripts/manage.py load-fact --source-dir DIR [--date YYYY-MM-DD]
+ python scripts/manage.py kb-init
+ python scripts/manage.py kb-drop --yes
 """
 
 import argparse
@@ -20,6 +22,9 @@ from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
+from rail_rag.rag.providers.config import load_model_config
+from rail_rag.rag.store.models import build_kb_schema
+from rail_rag.rag.store.schema import create_kb_schema, drop_kb_schema, stored_dimension
 
 logger = logging.getLogger("rail_rag.manage")
 
@@ -73,6 +78,31 @@ def _cmd_load_fact(source_dir: Path, service_date: dt.date | None, on_violation:
     return EXIT_OK
 
 
+def _cmd_kb_init() -> int:
+    """Create the knowledge-base schema at the configured embedding dimension."""
+    settings = get_settings()
+    config = load_model_config(settings.llm_config_path)
+    kb = build_kb_schema(config.embedding.dimension)
+    engine = create_db_engine(settings)
+    create_kb_schema(engine, kb)
+    logger.info(
+        "Knowledge base ready (model=%s, dimension=%d)", config.embedding.model, kb.dimension
+    )
+    return EXIT_OK
+
+
+def _cmd_kb_drop(confirmed: bool) -> int:
+    """Drop the knowledge-base schema, guarded by an explicit flag."""
+    if not confirmed:
+        logger.error("Refusing to drop the knowledge base without --yes.")
+        return EXIT_ERROR
+    engine = create_db_engine(get_settings())
+    width = stored_dimension(engine)
+    drop_kb_schema(engine)
+    logger.info("Done. Dropped vectors of dimension %s; 'kb-build' will re-embed.", width)
+    return EXIT_OK
+
+
 def _service_date(value: str) -> dt.date:
     return dt.date.fromisoformat(value)
 
@@ -102,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
         help="abort the load, or exclude and count the offending rows",
     )
+    sub.add_parser("kb-init", help="create the knowledge-base schema")
+    kb_drop = sub.add_parser("kb-drop", help="drop the knowledge base (destructive)")
+    kb_drop.add_argument("--yes", action="store_true", help="confirm the destructive operation")
     return parser
 
 
@@ -118,6 +151,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_load_dims(args.source_dir)
         if args.command == "load-fact":
             return _cmd_load_fact(args.source_dir, args.date, args.on_violation)
+        if args.command == "kb-init":
+            return _cmd_kb_init()
+        if args.command == "kb-drop":
+            return _cmd_kb_drop(confirmed=bool(args.yes))
         return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)
