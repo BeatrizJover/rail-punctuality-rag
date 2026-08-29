@@ -15,3 +15,14 @@ class RagError(RailRagError):
 
 class ProviderError(RagError):
     """Raised when a model provider is misconfigured, absent or unreachable."""
+
+
+class UnsafeQueryError(RagError):
+    """Raised when generated SQL violates the execution policy.
+
+    Distinct from :class:`QueryExecutionError`: nothing was sent to the database.
+    """
+
+
+class QueryExecutionError(RagError):
+    """Raised when a validated query fails, times out, or the database is down."""
