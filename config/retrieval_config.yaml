@@ -1,2 +1,34 @@
 # Retrieval configuration for the RAG layer.
 
+sql:
+  # Allow-list, not a deny-list: a new table is invisible until it is named here.
+  # Staging and ops are absent by design - stg_fact_stop_event is an unvalidated
+  # landing zone, and answering from it would report numbers the fact table rejected.
+  allowed_tables:
+    - gold.dim_date
+    - gold.dim_station
+    - gold.dim_relation
+    - gold.fact_stop_event
+
+  # Caps the outermost SELECT; a larger limit written by the model is tightened.
+  max_rows: 200
+
+  # Server-side, so a runaway query dies without the client having to cancel it.
+  statement_timeout_ms: 5000
+
+  # Reachable from SQL without any table privilege, hence blocked by name.
+  blocked_functions:
+    - pg_sleep
+    - pg_read_file
+    - pg_read_binary_file
+    - pg_ls_dir
+    - pg_stat_file
+    - lo_import
+    - lo_export
+    - dblink
+    - dblink_exec
+    - query_to_xml
+    - pg_terminate_backend
+    - pg_cancel_backend
+    - set_config
+    - pg_reload_conf
