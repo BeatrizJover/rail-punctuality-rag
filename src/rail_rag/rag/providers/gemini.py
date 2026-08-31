@@ -150,9 +150,7 @@ class GeminiEmbedder:
             )
             embeddings = getattr(response, "embeddings", None) or []
             if len(embeddings) != 1:
-                raise ProviderError(
-                    f"Gemini returned {len(embeddings)} vectors for one input"
-                )
+                raise ProviderError(f"Gemini returned {len(embeddings)} vectors for one input")
             values = getattr(embeddings[0], "values", None)
             if values is None or len(values) != self._config.dimension:
                 raise ProviderError(
