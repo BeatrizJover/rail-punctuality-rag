@@ -42,11 +42,6 @@ class Chunk:
     content: str
 
     @property
-    def content_hash(self) -> str:
-        """Digest of the text, so an unchanged chunk need not be re-embedded."""
-        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
-
-    @property
     def embedding_text(self) -> str:
         """The heading is prepended so the vector carries its own topic.
 
@@ -54,6 +49,15 @@ class Chunk:
         its own; prefixed with its heading it is not.
         """
         return f"{self.heading}\n\n{self.content}" if self.heading else self.content
+
+    @property
+    def content_hash(self) -> str:
+        """Digest of what is actually embedded, heading included.
+
+        Hashing ``content`` alone would let a renamed heading keep a vector built
+        from the old one: the text sent to the model changed, the digest did not.
+        """
+        return hashlib.sha256(self.embedding_text.encode("utf-8")).hexdigest()
 
 
 def chunk_markdown(
