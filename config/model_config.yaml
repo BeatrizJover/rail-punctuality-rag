@@ -1,23 +1,43 @@
 # LLM and embedding model configuration for the RAG layer.
 # Secrets never live here: the API key is read from RAIL_RAG_LLM_API_KEY.
-# Set provider to "fake" to run the whole stack offline, with no key.
+#
+# Profiles keep every combination that has been tried under version control.
+# Switching model means changing "active", not overwriting the previous entry.
+# Changing a profile's embedding dimension invalidates the stored vectors:
+# rebuild with kb-drop, kb-init, kb-build.
 
-provider: gemini
+active: gemini
 
-generation:
-  model: gemini-2.0-flash
-  # Deterministic by design: the same question must produce the same SQL.
-  temperature: 0.0
-  max_output_tokens: 1024
-  timeout_s: 60
+profiles:
 
-embedding:
-  model: text-embedding-004
-  # Pinned into the rag schema's vector(n) column; changing it needs a re-embed.
-  dimension: 768
-  batch_size: 32
-  timeout_s: 60
+  # Offline bench: the whole stack boots, answers and is tested with no API key.
+  fake:
+    provider: fake
+    generation:
+      model: fake-generation
+    embedding:
+      model: fake-embedding
+      dimension: 768
 
-# Free-tier quotas are per-minute, so a burst of embeddings will hit 429.
-max_retries: 3
-retry_backoff_s: 2.0
+  # Free-tier prototyping: enough to exercise routing, text-to-SQL and vector
+  # search end to end. Not a claim about answer quality.
+  gemini:
+    provider: gemini
+    generation:
+      model: gemini-2.5-flash
+      # Deterministic by design: the same question must produce the same SQL.
+      temperature: 0.0
+      max_output_tokens: 1024
+      timeout_s: 60
+    embedding:
+      model: gemini-embedding-2
+      # Truncated from the model's native width; pinned into the vector(n) column.
+      dimension: 768
+      batch_size: 32
+      timeout_s: 60
+    chunking:
+      max_chars: 1500
+      min_chars: 120
+    # Free-tier quotas are per-minute, so a burst of embeddings will hit 429.
+    max_retries: 3
+    retry_backoff_s: 2.0
