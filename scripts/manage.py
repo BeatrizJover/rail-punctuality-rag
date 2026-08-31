@@ -7,12 +7,15 @@ Usage:
  python scripts/manage.py load-fact --source-dir DIR [--date YYYY-MM-DD]
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
+ python scripts/manage.py kb-build [--force]
+ python scripts/manage.py kb-search --query TEXT
 """
 
 import argparse
 import datetime as dt
 import logging
 import sys
+import textwrap
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -22,14 +25,23 @@ from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
-from rail_rag.rag.providers.config import load_model_config
-from rail_rag.rag.store.models import build_kb_schema
+from rail_rag.rag.providers.config import ModelConfig, load_model_config
+from rail_rag.rag.providers.factory import build_embedder
+from rail_rag.rag.store.builder import build_knowledge_base
+from rail_rag.rag.store.models import KbSchema, build_kb_schema
+from rail_rag.rag.store.repository import kb_stats
+from rail_rag.rag.store.retriever import DEFAULT_TOP_K, Retriever
 from rail_rag.rag.store.schema import create_kb_schema, drop_kb_schema, stored_dimension
 
 logger = logging.getLogger("rail_rag.manage")
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+
+DEFAULT_CORPUS_DIR = Path("docs/knowledge")
+
+#: Enough of a passage to recognise it in the terminal without flooding it.
+_PREVIEW_CHARS = 160
 
 
 def _cmd_db_ping() -> int:
@@ -78,13 +90,17 @@ def _cmd_load_fact(source_dir: Path, service_date: dt.date | None, on_violation:
     return EXIT_OK
 
 
-def _cmd_kb_init() -> int:
-    """Create the knowledge-base schema at the configured embedding dimension."""
+def _model_setup(profile: str | None) -> tuple[ModelConfig, KbSchema]:
+    """Resolve the selected profile and the schema shape it implies."""
     settings = get_settings()
-    config = load_model_config(settings.llm_config_path)
-    kb = build_kb_schema(config.embedding.dimension)
-    engine = create_db_engine(settings)
-    create_kb_schema(engine, kb)
+    config = load_model_config(settings.llm_config_path, profile=profile)
+    return config, build_kb_schema(config.embedding.dimension)
+
+
+def _cmd_kb_init(profile: str | None) -> int:
+    """Create the knowledge-base schema at the configured embedding dimension."""
+    config, kb = _model_setup(profile)
+    create_kb_schema(create_db_engine(get_settings()), kb)
     logger.info(
         "Knowledge base ready (model=%s, dimension=%d)", config.embedding.model, kb.dimension
     )
@@ -103,8 +119,69 @@ def _cmd_kb_drop(confirmed: bool) -> int:
     return EXIT_OK
 
 
+def _cmd_kb_build(corpus_dir: Path, force: bool, profile: str | None) -> int:
+    """Chunk the corpus, upsert it, and embed whatever still needs a vector."""
+    settings = get_settings()
+    config, kb = _model_setup(profile)
+    engine = create_db_engine(settings)
+    report = build_knowledge_base(
+        engine,
+        kb,
+        build_embedder(config, settings.llm_api_key),
+        corpus_dir,
+        max_chars=config.chunking.max_chars,
+        min_chars=config.chunking.min_chars,
+        batch_size=config.embedding.batch_size,
+        force=force,
+    )
+    logger.info(
+        "Corpus: %d inserted, %d updated, %d unchanged, %d deleted",
+        report.sync.inserted,
+        report.sync.updated,
+        report.sync.unchanged,
+        report.sync.deleted,
+    )
+    logger.info(
+        "Embedded %d chunks in %d request(s) with %s",
+        report.embedded,
+        report.batches,
+        config.embedding.model,
+    )
+    stats = kb_stats(engine, kb)
+    logger.info("Knowledge base: %d chunks, %d embedded", stats.total, stats.embedded)
+    return EXIT_OK
+
+
+def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
+    """Retrieve passages for one question, to eyeball what the model will see."""
+    settings = get_settings()
+    config, kb = _model_setup(profile)
+    retriever = Retriever(
+        create_db_engine(settings),
+        kb,
+        build_embedder(config, settings.llm_api_key),
+        top_k=top_k,
+    )
+    results = retriever.retrieve(query)
+    if not results:
+        logger.warning("No passages retrieved. Has 'kb-build' run?")
+        return EXIT_OK
+    for rank, passage in enumerate(results, start=1):
+        logger.info(
+            "%d. [%.3f] %s / %s", rank, passage.similarity, passage.doc_id, passage.heading or "-"
+        )
+        logger.info("   %s", textwrap.shorten(passage.content, _PREVIEW_CHARS))
+    return EXIT_OK
+
+
 def _service_date(value: str) -> dt.date:
     return dt.date.fromisoformat(value)
+
+
+def _add_profile_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--profile", default=None, help="model profile to use (default: the active one)"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,9 +209,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
         help="abort the load, or exclude and count the offending rows",
     )
-    sub.add_parser("kb-init", help="create the knowledge-base schema")
+    kb_init = sub.add_parser("kb-init", help="create the knowledge-base schema")
+    _add_profile_option(kb_init)
     kb_drop = sub.add_parser("kb-drop", help="drop the knowledge base (destructive)")
     kb_drop.add_argument("--yes", action="store_true", help="confirm the destructive operation")
+    kb_build = sub.add_parser("kb-build", help="embed the corpus into the knowledge base")
+    kb_build.add_argument(
+        "--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR, help="markdown corpus directory"
+    )
+    kb_build.add_argument(
+        "--force", action="store_true", help="re-embed every chunk, ignoring the hashes"
+    )
+    _add_profile_option(kb_build)
+    kb_search = sub.add_parser("kb-search", help="retrieve passages for one question")
+    kb_search.add_argument("--query", required=True, help="the question to embed and search with")
+    kb_search.add_argument(
+        "--top-k", type=int, default=DEFAULT_TOP_K, help="how many passages to return"
+    )
+    _add_profile_option(kb_search)
     return parser
 
 
@@ -152,9 +244,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "load-fact":
             return _cmd_load_fact(args.source_dir, args.date, args.on_violation)
         if args.command == "kb-init":
-            return _cmd_kb_init()
+            return _cmd_kb_init(args.profile)
         if args.command == "kb-drop":
             return _cmd_kb_drop(confirmed=bool(args.yes))
+        if args.command == "kb-build":
+            return _cmd_kb_build(args.corpus_dir, bool(args.force), args.profile)
+        if args.command == "kb-search":
+            return _cmd_kb_search(args.query, int(args.top_k), args.profile)
         return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)
