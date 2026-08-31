@@ -76,7 +76,7 @@ def test_content_hash_is_stable_and_sensitive() -> None:
     first = Chunk("doc", 0, "H", "identical text")
     second = Chunk("doc", 5, "H", "identical text")
     different_heading = Chunk("doc", 0, "OTHER", "identical text")
-    different_content = Chunk("doc", 0, "H", "different text")    
+    different_content = Chunk("doc", 0, "H", "different text")
     assert first.content_hash == second.content_hash
     assert first.content_hash != different_heading.content_hash
     assert first.content_hash != different_content.content_hash
