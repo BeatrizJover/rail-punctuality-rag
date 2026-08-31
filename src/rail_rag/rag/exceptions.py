@@ -26,3 +26,7 @@ class UnsafeQueryError(RagError):
 
 class QueryExecutionError(RagError):
     """Raised when a validated query fails, times out, or the database is down."""
+
+
+class AnswerError(RagError):
+    """Raised when the pipeline cannot produce an answer it is willing to stand behind."""
