@@ -15,6 +15,8 @@ from sqlalchemy.exc import OperationalError
 
 from rail_rag.core.config import get_settings
 from rail_rag.db.schema import create_schema, drop_schema
+from rail_rag.rag.store.models import KbSchema, build_kb_schema
+from rail_rag.rag.store.schema import create_kb_schema, drop_kb_schema
 
 _TEST_DSN_VAR = "TEST_DATABASE_URL"
 _TEST_DB_SUFFIX = "_test"
@@ -26,6 +28,8 @@ _UNREACHABLE_SIGNALS = (
     "failed to resolve host",
     "timeout expired",
 )
+#: Small on purpose: the tests assert on ranking, not on embedding quality.
+_KB_TEST_DIMENSION = 8
 
 
 def _default_test_dsn() -> str:
@@ -112,3 +116,15 @@ def synthetic_gold_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out_dir = tmp_path_factory.mktemp("synthetic_gold")
     generate(out_dir, stations=20, days=3)
     return out_dir
+
+
+@pytest.fixture
+def kb_schema(postgres_engine: Engine) -> Iterator[KbSchema]:
+    """A knowledge-base schema created from scratch at a small test dimension."""
+    kb = build_kb_schema(_KB_TEST_DIMENSION)
+    drop_kb_schema(postgres_engine)
+    create_kb_schema(postgres_engine, kb)
+    try:
+        yield kb
+    finally:
+        drop_kb_schema(postgres_engine)
