@@ -135,25 +135,25 @@ class GeminiEmbedder:
         return self._embed([text], self._QUERY_TASK)[0]
 
     def _embed(self, batch: list[str], task_type: str) -> list[list[float]]:
-        request = self._types.EmbedContentConfig(
-            task_type=task_type,
-            output_dimensionality=self._config.dimension,
-            http_options=self._http_options(),
-        )
-        response = self._retrying.run(
-            "embedding",
-            lambda: self._client.models.embed_content(
-                model=self._config.model, contents=batch, config=request
-            ),
-        )
-        embeddings = getattr(response, "embeddings", None) or []
-        if len(embeddings) != len(batch):
-            raise ProviderError(
-                f"Gemini returned {len(embeddings)} vectors for {len(batch)} inputs"
-            )
         vectors: list[list[float]] = []
-        for embedding in embeddings:
-            values = getattr(embedding, "values", None)
+        for text in batch:
+            request = self._types.EmbedContentConfig(
+                task_type=task_type,
+                output_dimensionality=self._config.dimension,
+                http_options=self._http_options(),
+            )
+            response = self._retrying.run(
+                "embedding",
+                lambda text=text, request=request: self._client.models.embed_content(
+                    model=self._config.model, contents=text, config=request
+                ),
+            )
+            embeddings = getattr(response, "embeddings", None) or []
+            if len(embeddings) != 1:
+                raise ProviderError(
+                    f"Gemini returned {len(embeddings)} vectors for one input"
+                )
+            values = getattr(embeddings[0], "values", None)
             if values is None or len(values) != self._config.dimension:
                 raise ProviderError(
                     f"Gemini returned a vector of length {len(values or [])} "
