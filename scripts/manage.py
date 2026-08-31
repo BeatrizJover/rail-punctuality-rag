@@ -25,8 +25,10 @@ from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
+from rail_rag.rag.pipeline import AnswerPipeline
 from rail_rag.rag.providers.config import ModelConfig, load_model_config
-from rail_rag.rag.providers.factory import build_embedder
+from rail_rag.rag.providers.factory import build_embedder, build_generator
+from rail_rag.rag.sql.policy import load_retrieval_config
 from rail_rag.rag.store.builder import build_knowledge_base
 from rail_rag.rag.store.models import KbSchema, build_kb_schema
 from rail_rag.rag.store.repository import kb_stats
@@ -174,6 +176,41 @@ def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
     return EXIT_OK
 
 
+def _cmd_ask(
+    question: str,
+    show_sql: bool,
+    profile: str | None,
+) -> int:
+    """Answer one question using the full pipeline."""
+    settings = get_settings()
+    config, kb = _model_setup(profile)
+    engine = create_db_engine(settings)
+    retrieval = load_retrieval_config(Path("config/retrieval_config.yaml"))
+
+    generator = build_generator(config, settings.llm_api_key)
+    embedder = build_embedder(config, settings.llm_api_key)
+
+    pipe = AnswerPipeline(engine, generator, embedder, kb, retrieval.sql)
+    answer = pipe.answer(question)
+
+    logger.info("[%s]", answer.route.value)
+    if show_sql and answer.sql:
+        logger.info("SQL:\n%s", answer.sql)
+    if answer.result and not answer.result.is_empty:
+        header = " | ".join(answer.result.columns)
+        logger.info("%s", header)
+        for row in answer.result.rows:
+            logger.info("%s", " | ".join("" if v is None else str(v) for v in row))
+    logger.info("")
+    logger.info("%s", answer.text)
+    if answer.sources:
+        logger.info(
+            "Sources: %s",
+            ", ".join(f"{s.doc_id}/{s.heading}" if s.heading else s.doc_id for s in answer.sources),
+        )
+    return EXIT_OK
+
+
 def _service_date(value: str) -> dt.date:
     return dt.date.fromisoformat(value)
 
@@ -211,8 +248,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kb_init = sub.add_parser("kb-init", help="create the knowledge-base schema")
     _add_profile_option(kb_init)
+
     kb_drop = sub.add_parser("kb-drop", help="drop the knowledge base (destructive)")
     kb_drop.add_argument("--yes", action="store_true", help="confirm the destructive operation")
+    _add_profile_option(kb_drop)
+
     kb_build = sub.add_parser("kb-build", help="embed the corpus into the knowledge base")
     kb_build.add_argument(
         "--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR, help="markdown corpus directory"
@@ -221,12 +261,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="re-embed every chunk, ignoring the hashes"
     )
     _add_profile_option(kb_build)
+
     kb_search = sub.add_parser("kb-search", help="retrieve passages for one question")
     kb_search.add_argument("--query", required=True, help="the question to embed and search with")
     kb_search.add_argument(
         "--top-k", type=int, default=DEFAULT_TOP_K, help="how many passages to return"
     )
     _add_profile_option(kb_search)
+
+    ask = sub.add_parser("ask", help="answer one question using the full pipeline")
+    ask.add_argument("--question", required=True, help="the question to answer")
+    ask.add_argument("--show-sql", action="store_true", help="print the generated SQL")
+    _add_profile_option(ask)
+
     return parser
 
 
@@ -251,6 +298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_kb_build(args.corpus_dir, bool(args.force), args.profile)
         if args.command == "kb-search":
             return _cmd_kb_search(args.query, int(args.top_k), args.profile)
+        if args.command == "ask":
+            return _cmd_ask(args.question, bool(args.show_sql), args.profile)
         return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)
