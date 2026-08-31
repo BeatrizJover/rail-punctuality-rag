@@ -74,10 +74,12 @@ def test_short_fragments_are_merged_into_the_previous_chunk() -> None:
 def test_content_hash_is_stable_and_sensitive() -> None:
     """Stability is what lets a rebuild skip unchanged chunks and save quota."""
     first = Chunk("doc", 0, "H", "identical text")
-    second = Chunk("doc", 5, "OTHER", "identical text")
-    third = Chunk("doc", 0, "H", "different text")
+    second = Chunk("doc", 5, "H", "identical text")
+    different_heading = Chunk("doc", 0, "OTHER", "identical text")
+    different_content = Chunk("doc", 0, "H", "different text")    
     assert first.content_hash == second.content_hash
-    assert first.content_hash != third.content_hash
+    assert first.content_hash != different_heading.content_hash
+    assert first.content_hash != different_content.content_hash
 
 
 def test_embedding_text_carries_the_heading() -> None:
