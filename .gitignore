@@ -27,6 +27,3 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Data (kept out of version control by default)
-data/**
-!data/cache/.gitignore
