@@ -24,7 +24,7 @@ profiles:
   gemini:
     provider: gemini
     generation:
-      model: gemini-2.5-flash
+      model: models/gemini-3.6-flash
       # Deterministic by design: the same question must produce the same SQL.
       temperature: 0.0
       max_output_tokens: 1024
