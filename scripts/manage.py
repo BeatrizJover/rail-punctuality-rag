@@ -176,7 +176,11 @@ def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
     return EXIT_OK
 
 
-def _cmd_ask(question: str, show_sql: bool, profile: str | None,) -> int:
+def _cmd_ask(
+    question: str,
+    show_sql: bool,
+    profile: str | None,
+) -> int:
     """Answer one question using the full pipeline."""
     settings = get_settings()
     config, kb = _model_setup(profile)

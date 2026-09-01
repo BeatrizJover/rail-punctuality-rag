@@ -165,4 +165,3 @@ def test_an_empty_question_raises_answer_error(clean_schema: Engine, kb_schema: 
     pipeline, _ = _build(clean_schema, kb_schema, ["unused"])
     with pytest.raises(AnswerError, match="empty"):
         pipeline.answer("   ")
-
