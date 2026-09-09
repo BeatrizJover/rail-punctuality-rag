@@ -248,6 +248,7 @@ def _report(violations: list[Violation], on_violation: OnViolation) -> None:
     for violation in violations:
         logger.warning("%s (policy=%s)", violation.describe(), on_violation)
 
+
 def _dimension_source(source_dir: Path, name: str) -> Path:
     """Resolve a dimension's source: a ``{name}/`` export directory if present,
     else the ``{name}.parquet`` single-file sample. Lets the same loader read

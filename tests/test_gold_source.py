@@ -84,7 +84,7 @@ def test_contract_violation_names_the_row(tmp_path: Path) -> None:
     pq.write_table(table, path)
     with pytest.raises(IngestionError, match="row 1"):
         list(read_dim_station(path))
-        
+
 
 def _write_parts(directory: Path, tables: list[pa.Table]) -> None:
     """Write one Parquet part file per table into a directory, Spark-style."""

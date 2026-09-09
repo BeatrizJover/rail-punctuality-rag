@@ -37,10 +37,13 @@ RowT = TypeVar("RowT", bound=_GoldRow)
 class IngestionError(RailRagError):
     """Raised when a Gold source file is missing, unreadable, or violates a contract."""
 
+
 def _parquet_files(path: Path) -> list[Path]:
     """Resolve a Gold source path to the Parquet part files to read.
-       Raises:
-       IngestionError: if the path is neither a file nor a directory, or if a directory contains no Parquet part files.
+
+    Raises:
+        IngestionError: if the path is neither a file nor a directory, or if
+            a directory contains no Parquet part files.
     """
     if path.is_file():
         return [path]
@@ -57,9 +60,12 @@ def _read_table(
     model: type[RowT],
 ) -> Iterator[RowT]:
     """Stream one Gold table, yielding validated ``model`` rows.
-        Raises:
-        IngestionError: if the source is missing or unreadable, or if any row fails validation. 
-        The message carries the part file, the model and - for a bad row - its zero-based position and the underlying errors.
+
+    Raises:
+        IngestionError: if the source is missing or unreadable, or if any row
+            fails validation. The message carries the part file, the model
+            and - for a bad row - its zero-based position and the underlying
+            errors.
     """
     row_index = 0
     for part in _parquet_files(path):
