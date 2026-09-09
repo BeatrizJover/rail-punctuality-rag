@@ -120,7 +120,7 @@ def load_dimensions(
     run_id = run_id or new_run_id()
     results: dict[str, LoadCounts] = {}
     for name, table, reader in _DIMENSIONS:
-        path = source_dir / f"{name}.parquet"
+        path = _dimension_source(source_dir, name)
         entry_id = start_run(engine, run_id=run_id, table_name=name, source_file=str(path))
         try:
             counts = LoadCounts()
@@ -247,3 +247,12 @@ def load_fact(
 def _report(violations: list[Violation], on_violation: OnViolation) -> None:
     for violation in violations:
         logger.warning("%s (policy=%s)", violation.describe(), on_violation)
+
+def _dimension_source(source_dir: Path, name: str) -> Path:
+    """Resolve a dimension's source: a ``{name}/`` export directory if present,
+    else the ``{name}.parquet`` single-file sample. Lets the same loader read
+    both the real Databricks export and the synthetic fixture."""
+    directory = source_dir / name
+    if directory.is_dir():
+        return directory
+    return source_dir / f"{name}.parquet"
