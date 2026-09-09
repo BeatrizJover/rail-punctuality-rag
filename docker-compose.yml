@@ -1,9 +1,12 @@
 # Local PostgreSQL for development. Production-grade settings are out of scope:
 # this exists so the app talks to a real database instead of SQLite.
+# The pgvector image is the stock postgres image plus the vector extension; it is
+# Debian-based where postgres:16-alpine is musl-based, so the data directory is not
+# portable between them and the volume must be recreated when switching.
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: rail-rag-postgres
     restart: unless-stopped
     environment:

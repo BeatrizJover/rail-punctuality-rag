@@ -6,6 +6,7 @@ Settings are loaded from environment variables and ``.env`` files using ``pydant
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
     db_name: str = "rail_rag"
     db_user: str = "rail_rag"
     db_password: SecretStr = SecretStr("")
+
+    #: Non-secret model parameters live in a committed YAML file; only the key is an env var.
+    llm_config_path: Path = Path("config/model_config.yaml")
+    llm_api_key: SecretStr = SecretStr("")
 
     @property
     def database_url(self) -> str:

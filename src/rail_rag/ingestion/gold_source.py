@@ -38,36 +38,54 @@ class IngestionError(RailRagError):
     """Raised when a Gold source file is missing, unreadable, or violates a contract."""
 
 
+def _parquet_files(path: Path) -> list[Path]:
+    """Resolve a Gold source path to the Parquet part files to read.
+
+    Raises:
+        IngestionError: if the path is neither a file nor a directory, or if
+            a directory contains no Parquet part files.
+    """
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        parts = sorted(path.glob("*.parquet"))
+        if not parts:
+            raise IngestionError(f"No Parquet part files under directory: {path}")
+        return parts
+    raise IngestionError(f"Gold source path not found: {path}")
+
+
 def _read_table(
     path: Path,
     model: type[RowT],
 ) -> Iterator[RowT]:
-    """Stream one Parquet file, yielding validated ``model`` rows.
+    """Stream one Gold table, yielding validated ``model`` rows.
 
     Raises:
-        IngestionError: if the file is missing or unreadable, or if any row fails
-            validation. The message carries the file, the model and - for a bad
-            row - its zero-based position and the underlying field errors.
+        IngestionError: if the source is missing or unreadable, or if any row
+            fails validation. The message carries the part file, the model
+            and - for a bad row - its zero-based position and the underlying
+            errors.
     """
-    if not path.is_file():
-        raise IngestionError(f"Gold source file not found: {path}")
-
-    try:
-        parquet_file = pq.ParquetFile(path)
-    except Exception as exc:  # pyarrow raises a broad OSError/ArrowInvalid family
-        raise IngestionError(f"Could not open Parquet file {path}: {type(exc).__name__}") from exc
-
     row_index = 0
-    for batch in parquet_file.iter_batches(batch_size=_BATCH_SIZE):
-        for record in batch.to_pylist():
-            try:
-                yield model.model_validate(record)
-            except ValidationError as exc:
-                raise IngestionError(
-                    f"{model.__name__} row {row_index} in {path.name} "
-                    f"violates its contract: {exc.error_count()} error(s); {exc}"
-                ) from exc
-            row_index += 1
+    for part in _parquet_files(path):
+        try:
+            parquet_file = pq.ParquetFile(part)
+        except Exception as exc:  # pyarrow raises a broad OSError/ArrowInvalid family
+            raise IngestionError(
+                f"Could not open Parquet file {part}: {type(exc).__name__}"
+            ) from exc
+
+        for batch in parquet_file.iter_batches(batch_size=_BATCH_SIZE):
+            for record in batch.to_pylist():
+                try:
+                    yield model.model_validate(record)
+                except ValidationError as exc:
+                    raise IngestionError(
+                        f"{model.__name__} row {row_index} in {part.name} "
+                        f"violates its contract: {exc.error_count()} error(s); {exc}"
+                    ) from exc
+                row_index += 1
 
 
 def read_dim_date(path: Path) -> Iterator[DimDateRow]:

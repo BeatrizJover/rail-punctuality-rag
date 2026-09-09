@@ -84,3 +84,65 @@ def test_contract_violation_names_the_row(tmp_path: Path) -> None:
     pq.write_table(table, path)
     with pytest.raises(IngestionError, match="row 1"):
         list(read_dim_station(path))
+
+
+def _write_parts(directory: Path, tables: list[pa.Table]) -> None:
+    """Write one Parquet part file per table into a directory, Spark-style."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for i, table in enumerate(tables):
+        pq.write_table(table, directory / f"part-{i:05d}.parquet")
+
+
+def _dim_relation_table(n: int) -> pa.Table:
+    """Minimal dim_relation table with n rows, matching the export schema."""
+    rows = [
+        {
+            "relation_key": f"{i:032d}",
+            "relation": f"REL-{i}",
+            "relation_direction": None if i == 0 else "A -> B",
+            "operator": "SNCB/NMBS",
+        }
+        for i in range(n)
+    ]
+    return pa.Table.from_pylist(
+        rows,
+        schema=pa.schema(
+            [
+                ("relation_key", pa.string()),
+                ("relation", pa.string()),
+                ("relation_direction", pa.string()),
+                ("operator", pa.string()),
+            ]
+        ),
+    )
+
+
+def test_a_dimension_directory_is_read_across_all_part_files(tmp_path: Path) -> None:
+    table = _dim_relation_table(6)
+    half = table.num_rows // 2
+    _write_parts(tmp_path / "dim_relation", [table.slice(0, half), table.slice(half)])
+
+    rows = list(read_dim_relation(tmp_path / "dim_relation"))
+
+    assert len(rows) == table.num_rows
+
+
+def test_a_single_parquet_file_is_still_read(tmp_path: Path) -> None:
+    table = _dim_relation_table(6)
+    path = tmp_path / "dim_relation.parquet"
+    pq.write_table(table, path)
+
+    rows = list(read_dim_relation(path))
+
+    assert len(rows) == table.num_rows
+
+
+def test_an_empty_directory_is_a_loud_error(tmp_path: Path) -> None:
+    (tmp_path / "dim_relation").mkdir()
+    with pytest.raises(IngestionError, match="No Parquet part files"):
+        list(read_dim_relation(tmp_path / "dim_relation"))
+
+
+def test_a_missing_source_is_a_loud_error(tmp_path: Path) -> None:
+    with pytest.raises(IngestionError, match="not found"):
+        list(read_dim_relation(tmp_path / "does_not_exist"))
