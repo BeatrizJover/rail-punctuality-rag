@@ -19,6 +19,7 @@ from rail_rag.db.models import (
     metadata,
     ops_metadata,
 )
+from rail_rag.db.partitions import BASELINE_END, BASELINE_START, ensure_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,14 @@ def create_schema(engine: Engine) -> None:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{OPS_SCHEMA}"'))
             metadata.create_all(bind=conn, checkfirst=True)
             ops_metadata.create_all(bind=conn, checkfirst=True)
+            partitions = ensure_partitions(conn, BASELINE_START, BASELINE_END)
     except SQLAlchemyError as exc:
         raise DatabaseError(f"Could not create the Gold schema: {type(exc).__name__}") from exc
     logger.info(
-        "Schemas ready (%d Gold tables, %d ops tables)",
+        "Schemas ready (%d Gold tables, %d ops tables, %d fact partitions))",
         len(ORDERED_TABLES),
         len(ORDERED_OPS_TABLES),
+        len(partitions),
     )
 
 
