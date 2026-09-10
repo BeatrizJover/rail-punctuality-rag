@@ -29,6 +29,7 @@ from sqlalchemy import (
     Connection,
     Engine,
     Table,
+    and_,
     case,
     func,
     literal_column,
@@ -48,6 +49,7 @@ from rail_rag.db.models import (
 from rail_rag.db.run_log import LoadCounts, fail_run, finish_run, new_run_id, start_run
 from rail_rag.ingestion.data_contracts import _GoldRow
 from rail_rag.ingestion.fact_source import (
+    DateRange,
     fact_dir,
     is_partitioned,
     read_fact_batches,
@@ -153,27 +155,30 @@ def load_dimensions(
     return results
 
 
-def _day_range(service_date: dt.date | None) -> tuple[dt.date | None, dt.date | None]:
-    """Map ``--date`` to the half-open ``[day, day+1)`` the reader prunes on."""
-    if service_date is None:
-        return None, None
-    return service_date, service_date + dt.timedelta(days=1)
+def _scope_column(column: ColumnElement[Any], scope: DateRange) -> ColumnElement[bool] | None:
+    """A ``[start, end)`` predicate on ``column``, or ``None`` for a full scope."""
+    clauses: list[ColumnElement[bool]] = []
+    if scope.start is not None:
+        clauses.append(column >= scope.start)
+    if scope.end is not None:
+        clauses.append(column < scope.end)
+    if not clauses:
+        return None
+    return and_(*clauses)
 
 
-def _stage_fact(conn: Connection, source_dir: Path, service_date: dt.date | None) -> None:
+def _stage_fact(conn: Connection, source_dir: Path, scope: DateRange) -> None:
     """Empty staging and stream the fact into it, choosing the path by layout."""
     conn.execute(stg_fact_stop_event.delete())
     if is_partitioned(source_dir):
-        _copy_partitioned_fact(conn, source_dir, service_date)
+        _copy_partitioned_fact(conn, source_dir, scope)
     else:
         single_file = source_dir / "fact_stop_event.parquet"
         for batch in _batched(read_fact_stop_event(single_file), BATCH_SIZE):
             conn.execute(stg_fact_stop_event.insert(), batch)
 
 
-def _copy_partitioned_fact(
-    conn: Connection, source_dir: Path, service_date: dt.date | None
-) -> None:
+def _copy_partitioned_fact(conn: Connection, source_dir: Path, scope: DateRange) -> None:
     """DuckDB reads the partitioned dataset; psycopg COPYs it into staging.
 
     The COPY runs on this connection, so it shares the load's transaction: the
@@ -186,35 +191,45 @@ def _copy_partitioned_fact(
         " FROM STDIN WITH (FORMAT csv, HEADER false)"
     )
     write_options = pacsv.WriteOptions(include_header=False)
-    start, end = _day_range(service_date)
     driver_connection = conn.connection.driver_connection
     if driver_connection is None:  # pragma: no cover - defensive, psycopg always sets it
         raise DatabaseError("No DBAPI connection available for COPY")
     with driver_connection.cursor().copy(copy_sql) as copy:
-        for batch in read_fact_batches(source_dir, columns, start, end):
+        for batch in read_fact_batches(source_dir, columns, scope.start, scope.end):
             buffer = io.BytesIO()
             pacsv.write_csv(batch, buffer, write_options=write_options)
             copy.write(buffer.getvalue())
 
 
-def _staged_in_scope(conn: Connection, service_date: dt.date | None) -> int:
-    """Rows the run is responsible for; ``--date`` narrows what counts as rejected."""
+def _staged_in_scope(conn: Connection, scope: DateRange) -> int:
+    """Rows the run is responsible for; the range narrows what counts as rejected."""
     statement = select(func.count()).select_from(stg_fact_stop_event)
-    if service_date is not None:
-        statement = statement.where(stg_fact_stop_event.c.date_key == service_date)
+    predicate = _scope_column(stg_fact_stop_event.c.date_key, scope)
+    if predicate is not None:
+        statement = statement.where(predicate)
     return int(conn.execute(statement).scalar_one())
 
 
-def _fact_rows_in_scope(conn: Connection, service_date: dt.date | None) -> int:
-    """Rows already in the fact within this run's scope; the baseline for the split."""
-    statement = select(func.count()).select_from(fact_stop_event)
-    if service_date is not None:
-        statement = statement.where(fact_stop_event.c.date_key == service_date)
-    return int(conn.execute(statement).scalar_one())
+def _delete_fact_scope(conn: Connection, scope: DateRange) -> None:
+    """Clear the fact within the range so a reload replaces rather than merges.
+
+    The predicate prunes to the range's partitions, and dropping obsolete rows -
+    ones the new export no longer carries - is what makes a reload reproducible
+    rather than an accreting upsert.
+    """
+    predicate = _scope_column(fact_stop_event.c.date_key, scope)
+    statement = fact_stop_event.delete()
+    if predicate is not None:
+        statement = statement.where(predicate)
+    conn.execute(statement)
 
 
-def _promote(conn: Connection, service_date: dt.date | None, *, only_valid: bool) -> LoadCounts:
-    """Move staged rows into the fact, deriving ``measured_arrivals`` in SQL."""
+def _promote(conn: Connection, scope: DateRange, *, only_valid: bool) -> int:
+    """Move staged rows into the fact, deriving ``measured_arrivals`` in SQL.
+
+    The scope is already cleared, so every promoted row is an insert; the count
+    of promoted rows comes straight from the source projection.
+    """
     source_names = [column.name for column in stg_fact_stop_event.columns]
     selected: list[ColumnElement[Any]] = [stg_fact_stop_event.c[name] for name in source_names]
     selected.append(
@@ -224,9 +239,11 @@ def _promote(conn: Connection, service_date: dt.date | None, *, only_valid: bool
     )
     source = select(*selected)
     if only_valid:
-        source = source.where(valid_rows_clause(service_date))
-    elif service_date is not None:
-        source = source.where(stg_fact_stop_event.c.date_key == service_date)
+        source = source.where(valid_rows_clause())
+    else:
+        predicate = _scope_column(stg_fact_stop_event.c.date_key, scope)
+        if predicate is not None:
+            source = source.where(predicate)
 
     target_names = [*source_names, "measured_arrivals"]
     insert_stmt = pg_insert(fact_stop_event).from_select(target_names, source)
@@ -236,10 +253,8 @@ def _promote(conn: Connection, service_date: dt.date | None, *, only_valid: bool
         set_={name: insert_stmt.excluded[name] for name in updatable} | {"loaded_at": func.now()},
     )
     promoted = int(conn.execute(select(func.count()).select_from(source.subquery())).scalar_one())
-    before = _fact_rows_in_scope(conn, service_date)
     conn.execute(upsert)
-    inserted = _fact_rows_in_scope(conn, service_date) - before
-    return LoadCounts(rows_inserted=inserted, rows_updated=promoted - inserted)
+    return promoted
 
 
 def load_fact(
@@ -247,19 +262,31 @@ def load_fact(
     source_dir: Path,
     *,
     service_date: dt.date | None = None,
+    date_range: DateRange | None = None,
     on_violation: OnViolation = "fail",
     run_id: uuid.UUID | None = None,
 ) -> LoadCounts:
-    """Stage, validate and promote the fact export.
+    """Stage, validate and promote the fact export over a date scope.
+
+    ``service_date`` loads one day; ``date_range`` loads ``[start, end)``; neither
+    loads the whole export. They are mutually exclusive. The scope is cleared before
+    promotion, so a reload replaces its window rather than accreting onto it.
 
     Under ``fail`` a single violation aborts the load and leaves staging intact for
     diagnosis. Under ``skip`` every offending row is excluded and counted as rejected.
 
     Raises:
+        ValueError: if both ``service_date`` and ``date_range`` are given.
         DataQualityError: if rules failed and ``on_violation`` is ``fail``.
         IngestionError: if the source file is missing or violates its contract.
         DatabaseError: if staging or promotion fails.
     """
+    if service_date is not None and date_range is not None:
+        raise ValueError("Pass service_date or date_range, not both")
+    scope = (
+        DateRange.for_day(service_date) if service_date is not None else date_range or DateRange()
+    )
+
     path = (
         fact_dir(source_dir)
         if is_partitioned(source_dir)
@@ -271,13 +298,13 @@ def load_fact(
         run_id=run_id,
         table_name="fact_stop_event",
         source_file=str(path),
-        date_key=service_date,
+        date_key=scope.start,
     )
     try:
         with engine.begin() as conn:
-            _stage_fact(conn, source_dir, service_date)
-            staged = _staged_in_scope(conn, service_date)
-            violations = validate_staged_fact(conn, service_date)
+            _stage_fact(conn, source_dir, scope)
+            staged = _staged_in_scope(conn, scope)
+            violations = validate_staged_fact(conn)
             if violations:
                 _report(violations, on_violation)
             if violations and on_violation == "fail":
@@ -285,13 +312,13 @@ def load_fact(
                     f"{len(violations)} rule(s) failed on {staged} staged row(s): "
                     + " | ".join(v.describe() for v in violations)
                 )
-            counts = _promote(conn, service_date, only_valid=bool(violations))
-            promoted = counts.rows_inserted + counts.rows_updated
+            _delete_fact_scope(conn, scope)
+            promoted = _promote(conn, scope, only_valid=bool(violations))
             counts = LoadCounts(
                 rows_read=staged,
                 rows_rejected=staged - promoted,
-                rows_inserted=counts.rows_inserted,
-                rows_updated=counts.rows_updated,
+                rows_inserted=promoted,
+                rows_updated=0,
             )
     except SQLAlchemyError as exc:
         fail_run(engine, entry_id, f"{type(exc).__name__}")

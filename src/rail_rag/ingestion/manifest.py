@@ -124,3 +124,45 @@ def assert_dimension_counts(
             )
     if mismatches:
         raise IngestionError("Dimension load does not match the manifest: " + "; ".join(mismatches))
+
+
+def assert_fact_coverage(
+    manifest: CoverageManifest,
+    *,
+    loaded_rows: int,
+    on_disk_rows: int,
+    range_start: dt.date | None,
+    range_end: dt.date | None,
+) -> None:
+    """Gate a fact load against the manifest.
+
+    Full load (both bounds ``None``): the strong guarantee - every row the export
+    declared must have landed, ``loaded_rows == total_rows``.
+
+    Partial load: ``rows_per_year`` cannot be sliced to a day, so the check is that
+    the window sits inside the declared coverage and that everything DuckDB saw on
+    disk for it was promoted (``loaded_rows == on_disk_rows``).
+
+    Raises IngestionError on any shortfall.
+    """
+    fact = manifest.fact_stop_event
+    if range_start is None and range_end is None:
+        if loaded_rows != fact.total_rows:
+            raise IngestionError(
+                f"Fact load does not match the manifest: loaded {loaded_rows} row(s), "
+                f"manifest declares {fact.total_rows}"
+            )
+        return
+    if range_start is not None and range_start < fact.min_date_key:
+        raise IngestionError(
+            f"Requested range starts {range_start}, before the export's {fact.min_date_key}"
+        )
+    if range_end is not None and range_end > fact.max_date_key + dt.timedelta(days=1):
+        raise IngestionError(
+            f"Requested range ends {range_end}, after the export's {fact.max_date_key}"
+        )
+    if loaded_rows != on_disk_rows:
+        raise IngestionError(
+            f"Fact load does not match the export on disk: loaded {loaded_rows} row(s), "
+            f"export holds {on_disk_rows} for the requested range"
+        )

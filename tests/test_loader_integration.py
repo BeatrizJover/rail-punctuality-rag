@@ -82,12 +82,12 @@ def test_measured_arrivals_is_derived_in_sql(
 
 
 def test_reloading_a_day_is_idempotent(clean_schema: Engine, synthetic_gold_dir: Path) -> None:
-    """Same semantics as the upstream MERGE: reprocessing must not double the grain."""
+    """Reloading replaces its scope: the grain never doubles, and stale rows do not linger."""
     load_dimensions(clean_schema, synthetic_gold_dir)
     load_fact(clean_schema, synthetic_gold_dir)
     second = load_fact(clean_schema, synthetic_gold_dir)
-    assert second.rows_inserted == 0
-    assert second.rows_updated == 60
+    assert second.rows_inserted == 60
+    assert second.rows_updated == 0
     assert _count(clean_schema, fact_stop_event) == 60
 
 

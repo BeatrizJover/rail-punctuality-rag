@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -27,6 +28,31 @@ FACT_DIRNAME = "fact_stop_event"
 
 #: Rows per Arrow batch handed to the loader. Bounds the CSV buffer, not the scan.
 _BATCH_SIZE = 100_000
+
+
+@dataclass(frozen=True)
+class DateRange:
+    """Half-open ``[start, end)`` load scope. ``None`` on a bound means unbounded."""
+
+    start: dt.date | None = None
+    end: dt.date | None = None
+
+    @classmethod
+    def for_day(cls, day: dt.date) -> DateRange:
+        """The single-day scope ``[day, day + 1)`` that ``--date`` maps to."""
+        return cls(day, day + dt.timedelta(days=1))
+
+    @property
+    def is_full(self) -> bool:
+        """True when neither bound is set: the whole export is in scope."""
+        return self.start is None and self.end is None
+
+    def describe(self) -> str:
+        """Human-readable scope for logs and error messages."""
+        if self.is_full:
+            return "full export"
+        return f"[{self.start or '-inf'}, {self.end or '+inf'})"
+
 
 #: The columns the export must carry, ``date_key`` included (it comes from the path).
 _EXPECTED_COLUMNS: tuple[str, ...] = (

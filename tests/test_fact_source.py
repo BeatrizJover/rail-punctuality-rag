@@ -18,6 +18,7 @@ from sqlalchemy import Engine, FromClause, func, select, text
 
 from rail_rag.db.models import GOLD_SCHEMA, fact_stop_event, stg_fact_stop_event
 from rail_rag.ingestion.fact_source import (
+    DateRange,
     count_fact_rows,
     is_partitioned,
     read_fact_batches,
@@ -156,12 +157,13 @@ def test_disjoint_nulls_survive_the_copy(clean_schema: Engine, partitioned_gold_
 def test_reloading_a_partitioned_range_is_idempotent(
     clean_schema: Engine, partitioned_gold_dir: Path
 ) -> None:
+    """Reloading replaces the scope: the grain never doubles."""
     load_dimensions(clean_schema, partitioned_gold_dir)
     load_fact(clean_schema, partitioned_gold_dir)
     on_disk = count_fact_rows(partitioned_gold_dir, None, None)
     second = load_fact(clean_schema, partitioned_gold_dir)
-    assert second.rows_inserted == 0
-    assert second.rows_updated == on_disk
+    assert second.rows_inserted == on_disk
+    assert second.rows_updated == 0
     assert _count(clean_schema, fact_stop_event) == on_disk
 
 
@@ -186,3 +188,55 @@ def test_a_failed_partitioned_load_rolls_back_staging(
     with pytest.raises(Exception):  # noqa: B017 - dims absent, so every fact key is an orphan
         load_fact(clean_schema, partitioned_gold_dir)
     assert _count(clean_schema, stg_fact_stop_event) == counts_before
+
+
+# --- range loading and reproducible reloads --------------------------------
+
+
+def test_a_range_load_stages_only_its_window(
+    clean_schema: Engine, partitioned_gold_dir: Path
+) -> None:
+    """--from/--to prunes at the reader: only the window's rows reach the fact."""
+    load_dimensions(clean_schema, partitioned_gold_dir)
+    days = sorted(
+        dt.date.fromisoformat(p.name.removeprefix("date_key="))
+        for p in (partitioned_gold_dir / "fact_stop_event").glob("date_key=*")
+    )
+    window = DateRange(days[0], days[1] + dt.timedelta(days=1))  # first two days
+    in_window = count_fact_rows(partitioned_gold_dir, window.start, window.end)
+    total = count_fact_rows(partitioned_gold_dir, None, None)
+    assert in_window < total
+    counts = load_fact(clean_schema, partitioned_gold_dir, date_range=window)
+    assert counts.rows_inserted == in_window
+    assert _count(clean_schema, fact_stop_event) == in_window
+
+
+def test_a_reload_drops_rows_the_export_no_longer_carries(
+    clean_schema: Engine, partitioned_gold_dir: Path
+) -> None:
+    """Delete-then-insert: a grain that vanishes upstream must vanish here too."""
+    load_dimensions(clean_schema, partitioned_gold_dir)
+    load_fact(clean_schema, partitioned_gold_dir)
+    before = _count(clean_schema, fact_stop_event)
+    day = sorted(
+        dt.date.fromisoformat(p.name.removeprefix("date_key="))
+        for p in (partitioned_gold_dir / "fact_stop_event").glob("date_key=*")
+    )[0]
+    partition = partitioned_gold_dir / "fact_stop_event" / f"date_key={day.isoformat()}"
+    kept = pq.read_table(partition / "part-00000.parquet").slice(0, 1)
+    removed = pq.read_table(partition / "part-00000.parquet").num_rows - 1
+    pq.write_table(kept, partition / "part-00000.parquet")
+    load_fact(clean_schema, partitioned_gold_dir, date_range=DateRange.for_day(day))
+    assert _count(clean_schema, fact_stop_event) == before - removed
+
+
+def test_date_and_range_together_are_rejected(
+    clean_schema: Engine, partitioned_gold_dir: Path
+) -> None:
+    with pytest.raises(ValueError, match="not both"):
+        load_fact(
+            clean_schema,
+            partitioned_gold_dir,
+            service_date=dt.date(2026, 8, 23),
+            date_range=DateRange(dt.date(2026, 8, 1), dt.date(2026, 9, 1)),
+        )

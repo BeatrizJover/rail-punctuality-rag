@@ -4,7 +4,7 @@ Usage:
  python scripts/manage.py db-init
  python scripts/manage.py db-drop --yes
  python scripts/manage.py load-dims --source-dir DIR
- python scripts/manage.py load-fact --source-dir DIR [--date YYYY-MM-DD]
+ python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
  python scripts/manage.py kb-build [--force]
@@ -24,8 +24,13 @@ from rail_rag.core.exceptions import RailRagError
 from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
+from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
-from rail_rag.ingestion.manifest import assert_dimension_counts, read_manifest
+from rail_rag.ingestion.manifest import (
+    assert_dimension_counts,
+    assert_fact_coverage,
+    read_manifest,
+)
 from rail_rag.rag.pipeline import AnswerPipeline
 from rail_rag.rag.providers.config import ModelConfig, load_model_config
 from rail_rag.rag.providers.factory import build_embedder, build_generator
@@ -87,14 +92,42 @@ def _cmd_load_dims(source_dir: Path) -> int:
     return EXIT_OK
 
 
-def _cmd_load_fact(source_dir: Path, service_date: dt.date | None, on_violation: str) -> int:
-    """Stage, validate and promote the fact export."""
+def _cmd_load_fact(
+    source_dir: Path,
+    service_date: dt.date | None,
+    range_start: dt.date | None,
+    range_end: dt.date | None,
+    on_violation: str,
+) -> int:
+    """Stage, validate and promote the fact export over an optional date scope."""
+    if service_date is not None and (range_start is not None or range_end is not None):
+        logger.error("Pass --date, or --from/--to, not both.")
+        return EXIT_ERROR
     manifest = read_manifest(source_dir)
     logger.info("Export manifest: %s", manifest.describe())
     engine = create_db_engine(get_settings())
     policy: OnViolation = "skip" if on_violation == "skip" else "fail"
-    counts = load_fact(engine, source_dir, service_date=service_date, on_violation=policy)
+
+    scope = (
+        DateRange.for_day(service_date)
+        if service_date is not None
+        else DateRange(range_start, range_end)
+    )
+    counts = load_fact(engine, source_dir, date_range=scope, on_violation=policy)
     logger.info("fact_stop_event: %s", counts)
+
+    on_disk = (
+        count_fact_rows(source_dir, scope.start, scope.end)
+        if is_partitioned(source_dir)
+        else counts.rows_read
+    )
+    assert_fact_coverage(
+        manifest,
+        loaded_rows=counts.rows_inserted,
+        on_disk_rows=on_disk,
+        range_start=scope.start,
+        range_end=scope.end,
+    )
     return EXIT_OK
 
 
@@ -247,6 +280,20 @@ def build_parser() -> argparse.ArgumentParser:
     fact.add_argument("--source-dir", type=Path, required=True, help="Gold export directory")
     fact.add_argument("--date", type=_service_date, default=None, help="restrict to one date_key")
     fact.add_argument(
+        "--from",
+        dest="range_start",
+        type=_service_date,
+        default=None,
+        help="range start, inclusive (with --to)",
+    )
+    fact.add_argument(
+        "--to",
+        dest="range_end",
+        type=_service_date,
+        default=None,
+        help="range end, exclusive (with --from)",
+    )
+    fact.add_argument(
         "--on-violation",
         choices=("fail", "skip"),
         default="fail",
@@ -295,7 +342,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "load-dims":
             return _cmd_load_dims(args.source_dir)
         if args.command == "load-fact":
-            return _cmd_load_fact(args.source_dir, args.date, args.on_violation)
+            return _cmd_load_fact(
+                args.source_dir, args.date, args.range_start, args.range_end, args.on_violation
+            )
         if args.command == "kb-init":
             return _cmd_kb_init(args.profile)
         if args.command == "kb-drop":

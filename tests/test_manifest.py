@@ -15,6 +15,7 @@ from rail_rag.ingestion.gold_source import IngestionError
 from rail_rag.ingestion.manifest import (
     CoverageManifest,
     assert_dimension_counts,
+    assert_fact_coverage,
     read_manifest,
 )
 
@@ -206,3 +207,70 @@ def test_every_mismatching_dimension_is_reported() -> None:
     assert "dim_station" in message
     assert "dim_relation" in message
     assert "dim_date" not in message
+
+
+# --- fact coverage gate ----------------------------------------------------
+
+
+def test_a_full_load_matching_total_rows_passes() -> None:
+    assert_fact_coverage(
+        _manifest(),
+        loaded_rows=60950122,
+        on_disk_rows=60950122,
+        range_start=None,
+        range_end=None,
+    )
+
+
+def test_a_full_load_short_of_total_rows_fails() -> None:
+    with pytest.raises(IngestionError, match="manifest declares 60950122"):
+        assert_fact_coverage(
+            _manifest(),
+            loaded_rows=60_000_000,
+            on_disk_rows=60_000_000,
+            range_start=None,
+            range_end=None,
+        )
+
+
+def test_a_partial_load_matching_the_export_on_disk_passes() -> None:
+    assert_fact_coverage(
+        _manifest(),
+        loaded_rows=396959,
+        on_disk_rows=396959,
+        range_start=dt.date(2026, 9, 1),
+        range_end=dt.date(2026, 9, 8),
+    )
+
+
+def test_a_partial_load_short_of_the_export_on_disk_fails() -> None:
+    with pytest.raises(IngestionError, match="export holds 396959"):
+        assert_fact_coverage(
+            _manifest(),
+            loaded_rows=100,
+            on_disk_rows=396959,
+            range_start=dt.date(2026, 9, 1),
+            range_end=dt.date(2026, 9, 8),
+        )
+
+
+def test_a_range_starting_before_the_export_fails() -> None:
+    with pytest.raises(IngestionError, match="before the export"):
+        assert_fact_coverage(
+            _manifest(),
+            loaded_rows=0,
+            on_disk_rows=0,
+            range_start=dt.date(2019, 1, 1),
+            range_end=dt.date(2019, 2, 1),
+        )
+
+
+def test_a_range_ending_after_the_export_fails() -> None:
+    with pytest.raises(IngestionError, match="after the export"):
+        assert_fact_coverage(
+            _manifest(),
+            loaded_rows=0,
+            on_disk_rows=0,
+            range_start=dt.date(2026, 9, 1),
+            range_end=dt.date(2027, 1, 1),
+        )
