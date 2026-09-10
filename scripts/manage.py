@@ -25,6 +25,7 @@ from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
+from rail_rag.ingestion.manifest import assert_dimension_counts, read_manifest
 from rail_rag.rag.pipeline import AnswerPipeline
 from rail_rag.rag.providers.config import ModelConfig, load_model_config
 from rail_rag.rag.providers.factory import build_embedder, build_generator
@@ -77,14 +78,19 @@ def _cmd_db_drop(confirmed: bool, include_ops: bool) -> int:
 
 def _cmd_load_dims(source_dir: Path) -> int:
     """Upsert the three dimensions from a Gold export directory."""
+    manifest = read_manifest(source_dir)
+    logger.info("Export manifest: %s", manifest.describe())
     results = load_dimensions(create_db_engine(get_settings()), source_dir)
     for name, counts in results.items():
         logger.info("%s: %s", name, counts)
+    assert_dimension_counts(manifest, results)
     return EXIT_OK
 
 
 def _cmd_load_fact(source_dir: Path, service_date: dt.date | None, on_violation: str) -> int:
     """Stage, validate and promote the fact export."""
+    manifest = read_manifest(source_dir)
+    logger.info("Export manifest: %s", manifest.describe())
     engine = create_db_engine(get_settings())
     policy: OnViolation = "skip" if on_violation == "skip" else "fail"
     counts = load_fact(engine, source_dir, service_date=service_date, on_violation=policy)
