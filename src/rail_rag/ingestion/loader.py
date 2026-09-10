@@ -74,6 +74,8 @@ _DIMENSIONS: tuple[tuple[str, Table, Any], ...] = (
 )
 
 #: ``xmax = 0`` on a returned row means it was inserted, not updated by ON CONFLICT.
+#: Dimensions only: PostgreSQL refuses to return a system column from a partitioned
+#: table, so the fact counts its split from the row count instead.
 _WAS_INSERTED: ColumnClause[bool] = literal_column("(xmax = 0)", Boolean)
 
 
@@ -159,6 +161,14 @@ def _staged_in_scope(conn: Connection, service_date: dt.date | None) -> int:
     return int(conn.execute(statement).scalar_one())
 
 
+def _fact_rows_in_scope(conn: Connection, service_date: dt.date | None) -> int:
+    """Rows already in the fact within this run's scope; the baseline for the split."""
+    statement = select(func.count()).select_from(fact_stop_event)
+    if service_date is not None:
+        statement = statement.where(fact_stop_event.c.date_key == service_date)
+    return int(conn.execute(statement).scalar_one())
+
+
 def _promote(conn: Connection, service_date: dt.date | None, *, only_valid: bool) -> LoadCounts:
     """Move staged rows into the fact, deriving ``measured_arrivals`` in SQL."""
     source_names = [column.name for column in stg_fact_stop_event.columns]
@@ -180,10 +190,12 @@ def _promote(conn: Connection, service_date: dt.date | None, *, only_valid: bool
     upsert = insert_stmt.on_conflict_do_update(
         index_elements=list(GRAIN_COLUMNS),
         set_={name: insert_stmt.excluded[name] for name in updatable} | {"loaded_at": func.now()},
-    ).returning(_WAS_INSERTED)
-    outcomes = [bool(row[0]) for row in conn.execute(upsert)]
-    inserted = sum(outcomes)
-    return LoadCounts(rows_inserted=inserted, rows_updated=len(outcomes) - inserted)
+    )
+    promoted = int(conn.execute(select(func.count()).select_from(source.subquery())).scalar_one())
+    before = _fact_rows_in_scope(conn, service_date)
+    conn.execute(upsert)
+    inserted = _fact_rows_in_scope(conn, service_date) - before
+    return LoadCounts(rows_inserted=inserted, rows_updated=promoted - inserted)
 
 
 def load_fact(

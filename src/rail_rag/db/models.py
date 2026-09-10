@@ -138,6 +138,7 @@ fact_stop_event = Table(
         "Additive measures: stop_events, measured_arrivals, punctual_arrivals. "
         "Punctuality rate = SUM(punctual_arrivals) / SUM(measured_arrivals)."
     ),
+    postgresql_partition_by="RANGE (date_key)",
 )
 
 
