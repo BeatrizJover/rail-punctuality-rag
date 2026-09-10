@@ -13,6 +13,7 @@ that validates it.
 from __future__ import annotations
 
 import datetime as dt
+import io
 import logging
 import uuid
 from collections.abc import Iterable, Iterator
@@ -20,6 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
+import pyarrow.csv as pacsv
 from sqlalchemy import (
     Boolean,
     ColumnClause,
@@ -45,6 +47,11 @@ from rail_rag.db.models import (
 )
 from rail_rag.db.run_log import LoadCounts, fail_run, finish_run, new_run_id, start_run
 from rail_rag.ingestion.data_contracts import _GoldRow
+from rail_rag.ingestion.fact_source import (
+    fact_dir,
+    is_partitioned,
+    read_fact_batches,
+)
 from rail_rag.ingestion.gold_source import (
     read_dim_date,
     read_dim_relation,
@@ -146,11 +153,48 @@ def load_dimensions(
     return results
 
 
-def _stage_fact(conn: Connection, path: Path) -> None:
-    """Empty staging and stream the export into it."""
+def _day_range(service_date: dt.date | None) -> tuple[dt.date | None, dt.date | None]:
+    """Map ``--date`` to the half-open ``[day, day+1)`` the reader prunes on."""
+    if service_date is None:
+        return None, None
+    return service_date, service_date + dt.timedelta(days=1)
+
+
+def _stage_fact(conn: Connection, source_dir: Path, service_date: dt.date | None) -> None:
+    """Empty staging and stream the fact into it, choosing the path by layout."""
     conn.execute(stg_fact_stop_event.delete())
-    for batch in _batched(read_fact_stop_event(path), BATCH_SIZE):
-        conn.execute(stg_fact_stop_event.insert(), batch)
+    if is_partitioned(source_dir):
+        _copy_partitioned_fact(conn, source_dir, service_date)
+    else:
+        single_file = source_dir / "fact_stop_event.parquet"
+        for batch in _batched(read_fact_stop_event(single_file), BATCH_SIZE):
+            conn.execute(stg_fact_stop_event.insert(), batch)
+
+
+def _copy_partitioned_fact(
+    conn: Connection, source_dir: Path, service_date: dt.date | None
+) -> None:
+    """DuckDB reads the partitioned dataset; psycopg COPYs it into staging.
+
+    The COPY runs on this connection, so it shares the load's transaction: the
+    validation that follows sees the staged rows, and a rollback discards them.
+    """
+    columns = [column.name for column in stg_fact_stop_event.columns]
+    column_list = ", ".join(f'"{name}"' for name in columns)
+    copy_sql = (
+        f'COPY "{stg_fact_stop_event.schema}"."{stg_fact_stop_event.name}" ({column_list})'
+        " FROM STDIN WITH (FORMAT csv, HEADER false)"
+    )
+    write_options = pacsv.WriteOptions(include_header=False)
+    start, end = _day_range(service_date)
+    driver_connection = conn.connection.driver_connection
+    if driver_connection is None:  # pragma: no cover - defensive, psycopg always sets it
+        raise DatabaseError("No DBAPI connection available for COPY")
+    with driver_connection.cursor().copy(copy_sql) as copy:
+        for batch in read_fact_batches(source_dir, columns, start, end):
+            buffer = io.BytesIO()
+            pacsv.write_csv(batch, buffer, write_options=write_options)
+            copy.write(buffer.getvalue())
 
 
 def _staged_in_scope(conn: Connection, service_date: dt.date | None) -> int:
@@ -216,7 +260,11 @@ def load_fact(
         IngestionError: if the source file is missing or violates its contract.
         DatabaseError: if staging or promotion fails.
     """
-    path = source_dir / "fact_stop_event.parquet"
+    path = (
+        fact_dir(source_dir)
+        if is_partitioned(source_dir)
+        else source_dir / "fact_stop_event.parquet"
+    )
     run_id = run_id or new_run_id()
     entry_id = start_run(
         engine,
@@ -227,7 +275,7 @@ def load_fact(
     )
     try:
         with engine.begin() as conn:
-            _stage_fact(conn, path)
+            _stage_fact(conn, source_dir, service_date)
             staged = _staged_in_scope(conn, service_date)
             violations = validate_staged_fact(conn, service_date)
             if violations:
