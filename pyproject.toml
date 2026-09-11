@@ -25,7 +25,7 @@ dependencies = [
     "pgvector>=0.3",   
     "psycopg[binary]>=3.1",
     "pyarrow>=16",
-    "duckdb>=1.0",
+    "duckdb>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +55,14 @@ files = ["src", "tests", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+  # Third-party TestClient noise, not from our code:
+  # Starlette recommends httpx2, which is not yet published on PyPI; premature.
+  "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+  "ignore:Using `httpx` with `starlette.testclient`",
+  # Starlette's TestClient imports a deprecated anyio alias internally.
+  "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
 markers = [
   "integration: requires a running PostgreSQL instance (docker compose up -d)",
 ]
