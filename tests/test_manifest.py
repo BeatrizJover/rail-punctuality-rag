@@ -155,7 +155,7 @@ def test_a_manifest_is_immutable(tmp_path: Path) -> None:
     manifest = read_manifest(_write_manifest(tmp_path / "gold_export", _REAL_PAYLOAD))
 
     with pytest.raises(ValueError, match="frozen"):
-        manifest.dimensions = {}  # type: ignore[misc]
+        manifest.dimensions = {}  # type: ignore[misc, unused-ignore]
 
 
 def _manifest() -> CoverageManifest:
