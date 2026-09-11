@@ -5,6 +5,7 @@ Usage:
  python scripts/manage.py db-drop --yes
  python scripts/manage.py load-dims --source-dir DIR
  python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
+ python scripts/manage.py finalize
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
  python scripts/manage.py kb-build [--force]
@@ -24,6 +25,10 @@ from rail_rag.core.exceptions import RailRagError
 from rail_rag.core.logging import configure_logging
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
+from rail_rag.ingestion.derivations import (
+    assert_referential_integrity,
+    derive_station_activity,
+)
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
 from rail_rag.ingestion.manifest import (
@@ -128,6 +133,16 @@ def _cmd_load_fact(
         range_start=scope.start,
         range_end=scope.end,
     )
+    return EXIT_OK
+
+
+def _cmd_finalize() -> int:
+    """Close the load: derive station activity, then assert referential integrity."""
+    engine = create_db_engine(get_settings())
+    updated = derive_station_activity(engine)
+    logger.info("Derived activity for %d station(s).", updated)
+    assert_referential_integrity(engine)
+    logger.info("Referential integrity holds.")
     return EXIT_OK
 
 
@@ -299,6 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
         help="abort the load, or exclude and count the offending rows",
     )
+    sub.add_parser("finalize", help="derive station activity and assert referential integrity")
     kb_init = sub.add_parser("kb-init", help="create the knowledge-base schema")
     _add_profile_option(kb_init)
 
@@ -345,6 +361,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_load_fact(
                 args.source_dir, args.date, args.range_start, args.range_end, args.on_violation
             )
+        if args.command == "finalize":
+            return _cmd_finalize()
         if args.command == "kb-init":
             return _cmd_kb_init(args.profile)
         if args.command == "kb-drop":
