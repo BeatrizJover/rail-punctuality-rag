@@ -147,7 +147,7 @@ def read_fact_batches(
         _assert_columns(con, dataset, source_dir)
         projection = ", ".join(columns)
         query = f"SELECT {projection} FROM {dataset}{_range_predicate(start, end)}"
-        reader = con.execute(query).fetch_record_batch(_BATCH_SIZE)
+        reader = con.execute(query).to_arrow_reader(_BATCH_SIZE)
         yield from reader
     except duckdb.IOException as exc:
         raise IngestionError(
