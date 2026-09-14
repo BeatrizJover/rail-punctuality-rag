@@ -17,3 +17,7 @@ class DocumentError(RailRagError):
 
 class FetchError(DocumentError):
     """Raised when an external document cannot be downloaded, or fails its digest."""
+
+
+class ParseError(DocumentError):
+    """Raised when a downloaded document does not yield the structure it declares."""
