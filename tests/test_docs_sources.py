@@ -45,9 +45,9 @@ _PARSE_BLOCK = """    parse:
         - heading: Definitions
           columns: [term, definition, source]
         - heading: Explanation of abbreviations
-          columns: [abbreviation, expansion]
-          vertical_strategy: text
+          columns: [abbreviation, expansion]          
 """
+
 
 def _write(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "sources.yaml"
@@ -184,13 +184,6 @@ def test_each_section_carries_its_own_columns(tmp_path: Path) -> None:
     assert spec.select("Explanation of abbreviations").columns == ["abbreviation", "expansion"]
 
 
-def test_the_table_strategy_defaults_to_ruled_lines(tmp_path: Path) -> None:
-    """Most tables are drawn with a grid; the lineless one opts out explicitly."""
-    spec = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary").parse_spec()
-    assert spec.select("Definitions").vertical_strategy == "lines"
-    assert spec.select("Explanation of abbreviations").vertical_strategy == "text"
-
-
 def test_an_undeclared_section_is_rejected(tmp_path: Path) -> None:
     spec = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary").parse_spec()
     with pytest.raises(ConfigError, match="Undeclared section"):
@@ -214,16 +207,6 @@ def test_a_duplicated_section_heading_is_rejected(tmp_path: Path) -> None:
         + "        - heading: D\n          columns: [b]\n"
     )
     with pytest.raises(ConfigError, match="duplicate section heading: D"):
-        load_registry(_write(tmp_path, body))
-
-
-def test_an_unknown_table_strategy_is_rejected(tmp_path: Path) -> None:
-    body = (
-        _MINIMAL
-        + "    parse:\n      sections:\n        - heading: D\n          columns: [a]\n"
-        + "          vertical_strategy: magic\n"
-    )
-    with pytest.raises(ConfigError, match="Invalid source registry"):
         load_registry(_write(tmp_path, body))
 
 

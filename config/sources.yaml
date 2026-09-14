@@ -20,4 +20,4 @@ sources:
           columns: [term, definition, source]
         - heading: Explanation of abbreviations
           columns: [abbreviation, expansion]
-          vertical_strategy: text
+          
