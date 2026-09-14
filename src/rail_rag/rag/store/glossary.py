@@ -1,22 +1,4 @@
-"""Turn a parsed glossary into the passages the retriever already understands.
-
-The markdown corpus and this glossary arrive in different shapes but must leave
-in the same one: a list of :class:`~rail_rag.rag.store.chunking.Chunk`. Everything
-downstream - the hash that saves quota, the vector, the citation - is already
-built on that type, so nothing here invents a second notion of a passage.
-
-The retrieval unit is one glossary entry, not one row of the table. The source
-document splits a single entry across two rows when an abbreviation carries two
-senses: ``RT`` is both *Real-Time* and *Reservable Tracks*, drawn as one row with
-the abbreviation and one with a blank first column. Emitting those as two chunks
-would leave the second one headed by nothing - the exact orphan that
-``embedding_text`` exists to prevent - and would make ``chunk_index`` depend on
-how the publisher chose to draw a table rather than on what the glossary says.
-
-The blank cell is preserved in the parsed artefact on purpose: filling it in
-there would invent data. Folding it in belongs here, where it is a chunking
-decision and can be changed without re-parsing a PDF.
-"""
+"""Fold a parsed glossary artefact into the passages the retriever understands."""
 
 from __future__ import annotations
 
@@ -32,20 +14,16 @@ from rail_rag.rag.exceptions import RagError
 from rail_rag.rag.store.chunking import Chunk
 
 #: Joins two rows folded into one entry. A single newline is already taken: the
-#: parser uses it for a line wrapped *inside* one cell, so reusing it here would
-#: spell two different relationships with the same character.
+#: parser uses it for a line wrapped inside one cell.
 ENTRY_SEPARATOR = "\n\n"
 
-#: Joins the labelled fields of one row, for the same reason: a definition
-#: contains its own newlines, and its source must not read as another of them.
+#: Joins the labelled fields of one row, for the same reason.
 FIELD_SEPARATOR = "\n\n"
 
 #: Separates the section from the term in a heading, as ``kb-search`` prints it.
 HEADING_SEPARATOR = " — "
 
-#: The artefact stem is ``{source_id}__{version}``; the version is deliberately
-#: not part of the doc_id, so a new edition of a document updates its chunks in
-#: place instead of accumulating a second copy of every term.
+#: Artefact stems are ``{source_id}__{version}``; the version is not part of the doc_id.
 _STEM_SEPARATOR = "__"
 
 _WHITESPACE = re.compile(r"\s+")
@@ -62,23 +40,12 @@ class _Entry:
 
 
 def _flatten(text: str) -> str:
-    """Collapse internal whitespace, for text that has to sit on one line.
-
-    A term is wrapped across two physical lines often enough to matter
-    ("Commercial passenger transport\\nservices"), and that newline would end up
-    inside a heading, which both ``embedding_text`` and the CLI print as one.
-    """
+    """Collapse internal whitespace, for text that has to sit on one line."""
     return _WHITESPACE.sub(" ", text).strip()
 
 
 def _render_row(row: TableRow, columns: list[str]) -> str:
-    """Render the non-key columns of a row, labelling them only when there are
-    several.
-
-    Two columns without labels ("Article 3, 11 of the Railway Codex" under a
-    definition) read as a continuation of the sentence above. One column with a
-    label ("expansion: Real-Time") is noise in the vector.
-    """
+    """Render the non-key columns of a row, labelled only when the section declares several."""
     remaining = columns[1:]
     values = [(name, row.cells.get(name, "").strip()) for name in remaining]
     present = [(name, value) for name, value in values if value]
@@ -90,7 +57,11 @@ def _render_row(row: TableRow, columns: list[str]) -> str:
 
 
 def _columns_for(spec: ParseSpec, section: str) -> list[str]:
-    """The declared columns of a section, or a loud error naming the drift."""
+    """The declared columns of a section.
+
+    Raises:
+        RagError: if the section is not declared in the registry.
+    """
     try:
         return spec.select(section).columns
     except ConfigError as exc:
@@ -104,11 +75,7 @@ def _columns_for(spec: ParseSpec, section: str) -> list[str]:
 def glossary_chunks(blocks: Iterable[Block], spec: ParseSpec, *, doc_id: str) -> list[Chunk]:
     """Fold a stream of canonical blocks into retrievable passages.
 
-    Headings are dropped: every block already carries the ``section`` it was
-    found under, so the heading block adds nothing a consumer cannot see. Prose
-    outside the tables is kept as a passage of its own - the source glossary
-    puts a real cross-reference there, and dropping it would be exactly the
-    silent loss the block contract was written to avoid.
+    Headings are dropped; prose outside the tables becomes a passage of its own.
 
     Raises:
         RagError: if a section is not declared, if a row is missing its key
@@ -169,10 +136,7 @@ def glossary_chunks(blocks: Iterable[Block], spec: ParseSpec, *, doc_id: str) ->
 
 
 def doc_id_for(path: Path) -> str:
-    """The source_id an artefact was written under.
-
-    Inverse of ``artefact_paths``, which builds the stem as
-    ``{source_id}__{version}``.
+    """The source_id an artefact was written under, inverse of ``artefact_paths``.
 
     Raises:
         RagError: if the filename does not follow that convention.

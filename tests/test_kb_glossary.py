@@ -1,10 +1,4 @@
-"""Tests for folding a parsed glossary into retrievable passages.
-
-Every block here is a literal line from ``infrabel_ns_glossary__20260402.jsonl``,
-pasted rather than generated: the behaviour under test is a response to how the
-real document is drawn, so a hand-written row would only prove the code agrees
-with my idea of the document.
-"""
+"""Tests for folding a parsed glossary into retrievable passages."""
 
 from __future__ import annotations
 
@@ -93,8 +87,7 @@ def _blocks(*lines: str) -> list[Block]:
 
 
 def test_a_second_sense_folds_into_the_entry_it_belongs_to() -> None:
-    """``RT`` is drawn as two rows because it means two things, not because one
-    definition ran over. Split, the second is headed by nothing."""
+    """``RT`` is two rows because it means two things, not because one ran over."""
     chunks = glossary_chunks(
         _blocks(ABBREV_HEADING, RT_FIRST_SENSE, RT_SECOND_SENSE, RU_ROW), SPEC, doc_id=DOC_ID
     )
@@ -104,16 +97,14 @@ def test_a_second_sense_folds_into_the_entry_it_belongs_to() -> None:
 
 
 def test_the_two_senses_are_separated_by_a_blank_line() -> None:
-    """A single newline already means 'this cell wrapped'; a space would produce
-    the nonsense string "Real-Time Reservable Tracks"."""
+    """A space would produce the nonsense string 'Real-Time Reservable Tracks'."""
     chunks = glossary_chunks(_blocks(RT_FIRST_SENSE, RT_SECOND_SENSE), SPEC, doc_id=DOC_ID)
     assert "Real-Time Reservable Tracks" not in chunks[0].content
     assert chunks[0].content.splitlines() == ["Real-Time", "", "Reservable Tracks"]
 
 
 def test_folding_removes_a_position_rather_than_leaving_a_gap() -> None:
-    """Three rows, two entries: ``chunk_index`` counts what the glossary says,
-    not how many rectangles the publisher drew."""
+    """``chunk_index`` counts entries, not the rectangles the publisher drew."""
     chunks = glossary_chunks(_blocks(RT_FIRST_SENSE, RT_SECOND_SENSE, RU_ROW), SPEC, doc_id=DOC_ID)
     assert [chunk.chunk_index for chunk in chunks] == [0, 1]
     assert chunks[1].heading == "Explanation of abbreviations — RU"
@@ -125,8 +116,7 @@ def test_a_continuation_with_nothing_to_continue_is_a_loud_error() -> None:
 
 
 def test_a_continuation_does_not_attach_across_a_section_boundary() -> None:
-    """The blank cell means 'the row above'; the row above being in another
-    table means the artefact is not what it claims."""
+    """The blank cell means 'the row above'; across tables that claim is false."""
     with pytest.raises(RagError, match="no preceding entry"):
         glossary_chunks(_blocks(APPLICANT_ROW, RT_SECOND_SENSE), SPEC, doc_id=DOC_ID)
 
@@ -135,7 +125,7 @@ def test_a_continuation_does_not_attach_across_a_section_boundary() -> None:
 
 
 def test_a_two_column_section_is_rendered_without_labels() -> None:
-    """ "expansion: Real-Time" would put a config key into the vector."""
+    """'expansion: Real-Time' would put a config key into the vector."""
     chunks = glossary_chunks(_blocks(RU_ROW), SPEC, doc_id=DOC_ID)
     assert chunks[0].content == "Railway Undertaking"
 
@@ -154,8 +144,7 @@ def test_a_newline_inside_a_cell_is_left_alone() -> None:
 
 
 def test_a_term_wrapped_across_two_lines_is_flattened_in_the_heading() -> None:
-    """The heading is printed on one line by ``kb-search`` and prefixed to the
-    embedding text; a newline inside it would break both."""
+    """A heading is printed on one line and prefixed to the embedding text."""
     chunks = glossary_chunks(_blocks(WRAPPED_TERM_ROW), SPEC, doc_id=DOC_ID)
     assert chunks[0].heading == ("Definitions — Commercial passenger transport services (HkvNPso);")
     assert "\n" not in (chunks[0].heading or "")
@@ -188,7 +177,7 @@ def test_the_embedding_text_carries_section_and_term() -> None:
 
 
 def test_the_hash_moves_when_a_folded_sense_changes() -> None:
-    """The reason folding is safe for quota: the digest covers the whole entry."""
+    """Why folding is safe for quota: the digest covers the whole entry."""
     folded = glossary_chunks(_blocks(RT_FIRST_SENSE, RT_SECOND_SENSE), SPEC, doc_id=DOC_ID)
     alone = glossary_chunks(_blocks(RT_FIRST_SENSE), SPEC, doc_id=DOC_ID)
     assert folded[0].content_hash != alone[0].content_hash
