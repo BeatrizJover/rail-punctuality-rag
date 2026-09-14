@@ -6,7 +6,8 @@ Usage:
  python scripts/manage.py load-dims --source-dir DIR
  python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
  python scripts/manage.py finalize
-  python scripts/manage.py docs-fetch --source ID [--bootstrap]
+ python scripts/manage.py docs-fetch --source ID [--bootstrap]
+ python scripts/manage.py docs-parse --source ID
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
  python scripts/manage.py kb-build [--force]
@@ -18,6 +19,7 @@ import datetime as dt
 import logging
 import sys
 import textwrap
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -31,7 +33,24 @@ from rail_rag.ingestion.derivations import (
     derive_station_activity,
     optimize_fact_for_reads,
 )
-from rail_rag.ingestion.docs.fetcher import DEFAULT_RAW_DIR, fetch_source, probe_digest
+from rail_rag.ingestion.docs.canonical import (
+    DEFAULT_PARSED_DIR,
+    PARSER_VERSION,
+    ParseManifest,
+    artefact_paths,
+    write_blocks,
+)
+from rail_rag.ingestion.docs.exceptions import ParseError
+from rail_rag.ingestion.docs.fetcher import (
+    DEFAULT_RAW_DIR,
+    FetchManifest,
+    artefact_path,
+    fetch_source,
+    manifest_path,
+    probe_digest,
+    sha256_of,
+)
+from rail_rag.ingestion.docs.pdf_reader import parse_document
 from rail_rag.ingestion.docs.sources import load_source
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
@@ -173,6 +192,45 @@ def _cmd_docs_fetch(source_id: str, dest_dir: Path, bootstrap: bool) -> int:
         logger.info("Stored %s (%d bytes).", outcome.path, outcome.manifest.bytes)
     else:
         logger.info("Already present and verified: %s", outcome.path)
+    return EXIT_OK
+
+
+def _cmd_docs_parse(source_id: str, dest_dir: Path) -> int:
+    """Parse one fetched document into canonical JSONL, verified against its fetch manifest."""
+    source = load_source(DEFAULT_SOURCES_REGISTRY, source_id)
+    artefact = artefact_path(source, DEFAULT_RAW_DIR)
+    if not artefact.exists():
+        raise ParseError(f"{artefact} does not exist; run 'docs-fetch --source {source_id}' first.")
+
+    fetched = FetchManifest.model_validate_json(manifest_path(artefact).read_text(encoding="utf-8"))
+    digest = sha256_of(artefact)
+    if digest != fetched.sha256:
+        raise ParseError(
+            f"{artefact} has digest {digest}, but its fetch manifest recorded "
+            f"{fetched.sha256}. Something touched the file after it was fetched."
+        )
+
+    blocks = parse_document(artefact, source)
+    sections: Counter[str] = Counter(block.section for block in blocks)
+
+    manifest = ParseManifest(
+        source_id=source.source_id,
+        version=source.version,
+        source_sha256=digest,
+        parser_version=PARSER_VERSION,
+        block_count=len(blocks),
+        blocks_per_section=dict(sections),
+        parsed_at=dt.datetime.now(dt.UTC),
+    )
+
+    stream_path, meta_path = artefact_paths(source.source_id, source.version, dest_dir)
+    written = write_blocks(stream_path, blocks)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
+
+    logger.info("Parsed %d block(s) into %s", written, stream_path)
+    for heading, count in sections.items():
+        logger.info("  %s: %d", heading, count)
     return EXIT_OK
 
 
@@ -348,6 +406,16 @@ def build_parser() -> argparse.ArgumentParser:
     docs_fetch.add_argument(
         "--bootstrap", action="store_true", help="print the digest to pin, store nothing"
     )
+    docs_parse = sub.add_parser("docs-parse", help="parse a fetched document into canonical JSONL")
+    docs_parse.add_argument(
+        "--source", required=True, help="source_id declared in config/sources.yaml"
+    )
+    docs_parse.add_argument(
+        "--dest-dir",
+        type=Path,
+        default=DEFAULT_PARSED_DIR,
+        help="where the parsed JSONL is stored",
+    )
     kb_init = sub.add_parser("kb-init", help="create the knowledge-base schema")
     _add_profile_option(kb_init)
 
@@ -398,6 +466,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_finalize()
         if args.command == "docs-fetch":
             return _cmd_docs_fetch(args.source, args.dest_dir, bool(args.bootstrap))
+        if args.command == "docs-parse":
+            return _cmd_docs_parse(args.source, args.dest_dir)
         if args.command == "kb-init":
             return _cmd_kb_init(args.profile)
         if args.command == "kb-drop":
