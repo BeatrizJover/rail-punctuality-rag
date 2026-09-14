@@ -14,3 +14,10 @@ sources:
     language: en
     document_type: glossary
     sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    parse:
+      sections:
+        - heading: Definitions
+          columns: [term, definition, source]
+        - heading: Explanation of abbreviations
+          columns: [abbreviation, expansion]
+          vertical_strategy: text

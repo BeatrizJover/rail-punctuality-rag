@@ -1,6 +1,21 @@
 """Acquisition and parsing of external documentation sources."""
 
-from rail_rag.ingestion.docs.exceptions import DocumentError, FetchError
+from rail_rag.ingestion.docs.canonical import (
+    DEFAULT_PARSED_DIR,
+    PARSER_VERSION,
+    BBox,
+    Block,
+    Heading,
+    Paragraph,
+    ParseManifest,
+    TableRow,
+    artefact_paths,
+    decode_block,
+    encode_block,
+    read_blocks,
+    write_blocks,
+)
+from rail_rag.ingestion.docs.exceptions import DocumentError, FetchError, ParseError
 from rail_rag.ingestion.docs.fetcher import (
     DEFAULT_RAW_DIR,
     FetchManifest,
@@ -13,24 +28,44 @@ from rail_rag.ingestion.docs.fetcher import (
 )
 from rail_rag.ingestion.docs.sources import (
     DocumentSource,
+    ParseSpec,
+    SectionSpec,
     SourceRegistry,
+    TableStrategy,
     load_registry,
     load_source,
 )
 
 __all__ = [
+    "DEFAULT_PARSED_DIR",
     "DEFAULT_RAW_DIR",
+    "PARSER_VERSION",
+    "BBox",
+    "Block",
     "DocumentError",
     "DocumentSource",
     "FetchError",
     "FetchManifest",
     "FetchOutcome",
+    "Heading",
+    "Paragraph",
+    "ParseError",
+    "ParseManifest",
+    "ParseSpec",
+    "SectionSpec",
     "SourceRegistry",
+    "TableRow",
+    "TableStrategy",
     "artefact_path",
+    "artefact_paths",
+    "decode_block",
+    "encode_block",
     "fetch_source",
     "load_registry",
     "load_source",
     "manifest_path",
     "probe_digest",
+    "read_blocks",
     "sha256_of",
+    "write_blocks",
 ]
