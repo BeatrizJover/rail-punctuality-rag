@@ -6,6 +6,7 @@ Usage:
  python scripts/manage.py load-dims --source-dir DIR
  python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
  python scripts/manage.py finalize
+  python scripts/manage.py docs-fetch --source ID [--bootstrap]
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
  python scripts/manage.py kb-build [--force]
@@ -30,6 +31,8 @@ from rail_rag.ingestion.derivations import (
     derive_station_activity,
     optimize_fact_for_reads,
 )
+from rail_rag.ingestion.docs.fetcher import DEFAULT_RAW_DIR, fetch_source, probe_digest
+from rail_rag.ingestion.docs.sources import load_source
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
 from rail_rag.ingestion.manifest import (
@@ -53,6 +56,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 
 DEFAULT_CORPUS_DIR = Path("docs/knowledge")
+DEFAULT_SOURCES_REGISTRY = Path("config/sources.yaml")
 
 #: Enough of a passage to recognise it in the terminal without flooding it.
 _PREVIEW_CHARS = 160
@@ -154,6 +158,22 @@ def _model_setup(profile: str | None) -> tuple[ModelConfig, KbSchema]:
     settings = get_settings()
     config = load_model_config(settings.llm_config_path, profile=profile)
     return config, build_kb_schema(config.embedding.dimension)
+
+
+def _cmd_docs_fetch(source_id: str, dest_dir: Path, bootstrap: bool) -> int:
+    """Download one declared external document, or print the digest to pin it with."""
+    source = load_source(DEFAULT_SOURCES_REGISTRY, source_id)
+    if bootstrap:
+        digest = probe_digest(source)
+        logger.info("Pin it in %s under %s:", DEFAULT_SOURCES_REGISTRY, source.source_id)
+        logger.info('    sha256: "%s"', digest)
+        return EXIT_OK
+    outcome = fetch_source(source, dest_dir)
+    if outcome.downloaded:
+        logger.info("Stored %s (%d bytes).", outcome.path, outcome.manifest.bytes)
+    else:
+        logger.info("Already present and verified: %s", outcome.path)
+    return EXIT_OK
 
 
 def _cmd_kb_init(profile: str | None) -> int:
@@ -318,6 +338,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="abort the load, or exclude and count the offending rows",
     )
     sub.add_parser("finalize", help="derive station activity and assert referential integrity")
+    docs_fetch = sub.add_parser("docs-fetch", help="download a declared external document")
+    docs_fetch.add_argument(
+        "--source", required=True, help="source_id declared in config/sources.yaml"
+    )
+    docs_fetch.add_argument(
+        "--dest-dir", type=Path, default=DEFAULT_RAW_DIR, help="where the artefact is stored"
+    )
+    docs_fetch.add_argument(
+        "--bootstrap", action="store_true", help="print the digest to pin, store nothing"
+    )
     kb_init = sub.add_parser("kb-init", help="create the knowledge-base schema")
     _add_profile_option(kb_init)
 
@@ -366,6 +396,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "finalize":
             return _cmd_finalize()
+        if args.command == "docs-fetch":
+            return _cmd_docs_fetch(args.source, args.dest_dir, bool(args.bootstrap))
         if args.command == "kb-init":
             return _cmd_kb_init(args.profile)
         if args.command == "kb-drop":
