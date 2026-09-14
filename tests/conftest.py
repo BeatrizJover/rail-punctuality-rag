@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote_plus
 
 import pytest
 from dotenv import dotenv_values
+from reportlab.lib.colors import black
+from reportlab.pdfgen.canvas import Canvas
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.exc import OperationalError
 
@@ -128,3 +131,101 @@ def kb_schema(postgres_engine: Engine) -> Iterator[KbSchema]:
         yield kb
     finally:
         drop_kb_schema(postgres_engine)
+
+
+# --- synthetic glossary PDFs ------------------------------------------------
+#
+# Built rather than committed, because the point of a fixture is that a reviewer
+# can see what it asserts. A binary under tests/fixtures says nothing about which
+# page carries the decoy underline or where the running header sits.
+#
+# The tables are drawn the way the real publisher draws them: one thin FILLED
+# RECTANGLE per column under each row, and no vertical marks at all. A fixture
+# drawn with a full grid would pass against a parser that could never read the
+# real document.
+
+#: Matches the real document closely enough for the geometry to be comparable.
+PAGE_WIDTH = 842.0
+PAGE_HEIGHT = 595.0
+RULE_THICKNESS = 0.6
+
+_HEADER_TOP = 30.0
+_STRAY_TOP = 86.0
+_HEADING_TOP = 110.0
+_TABLE_TOP = 140.0
+_ROW_HEIGHT = 36.0
+_FOOTER_TOP = 560.0
+
+
+@dataclass(frozen=True)
+class FakePage:
+    """One page of a synthetic glossary."""
+
+    #: Emitted as table rows. Include the header row explicitly when the test
+    #: needs the parser to recognise and drop one.
+    rows: list[list[str]] = field(default_factory=list)
+    #: Repeated on every page by default, so it becomes running furniture.
+    running: tuple[str, ...] = ("NETWORK STATEMENT", "Version: 01/01/2026")
+    #: Printed above the table; the parser matches it against the registry.
+    heading: str | None = None
+    #: Prose outside the table, which a two-type contract would silently drop.
+    stray: str | None = None
+    #: A hyperlink underline: thin, wide, horizontal, aligned with nothing.
+    decoy_underline: bool = False
+    #: When false, no rules are drawn and the page carries no measurable table.
+    draw_rules: bool = True
+
+
+def write_glossary_pdf(
+    path: Path,
+    pages: list[FakePage],
+    *,
+    column_edges: tuple[float, ...] = (71.0, 241.0, 610.0, 780.0),
+) -> Path:
+    """Draw a synthetic glossary and return the path it was written to."""
+    canvas = Canvas(str(path), pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
+    canvas.setFillColor(black)
+
+    def text(content: str, x: float, top: float, size: float = 10.0) -> None:
+        canvas.setFont("Helvetica", size)
+        canvas.drawString(x, PAGE_HEIGHT - top - size, content)
+
+    def rule(x0: float, x1: float, top: float) -> None:
+        canvas.rect(
+            x0,
+            PAGE_HEIGHT - top - RULE_THICKNESS,
+            x1 - x0,
+            RULE_THICKNESS,
+            stroke=0,
+            fill=1,
+        )
+
+    for index, page in enumerate(pages, start=1):
+        for offset, line in enumerate(page.running):
+            text(line, 600.0, _HEADER_TOP + offset * 18.0)
+        text(str(index), 410.0, _FOOTER_TOP)
+
+        if page.stray is not None:
+            text(page.stray, column_edges[0], _STRAY_TOP)
+        if page.heading is not None:
+            text(page.heading, column_edges[0], _HEADING_TOP, size=13.0)
+        if page.decoy_underline:
+            # Sits between the heading and the table, spanning no column.
+            rule(column_edges[1] + 40.0, column_edges[-1] - 30.0, _HEADING_TOP + 17.0)
+
+        for row_index, row in enumerate(page.rows):
+            top = _TABLE_TOP + row_index * _ROW_HEIGHT
+            if page.draw_rules:
+                for left, right in zip(column_edges, column_edges[1:], strict=False):
+                    rule(left, right, top)
+            for cell, left in zip(row, column_edges, strict=False):
+                text(cell, left + 5.0, top + 10.0)
+        if page.rows and page.draw_rules:
+            bottom = _TABLE_TOP + len(page.rows) * _ROW_HEIGHT
+            for left, right in zip(column_edges, column_edges[1:], strict=False):
+                rule(left, right, bottom)
+
+        canvas.showPage()
+
+    canvas.save()
+    return path
