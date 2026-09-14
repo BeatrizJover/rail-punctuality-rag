@@ -28,6 +28,7 @@ from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.derivations import (
     assert_referential_integrity,
     derive_station_activity,
+    optimize_fact_for_reads,
 )
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
@@ -137,12 +138,14 @@ def _cmd_load_fact(
 
 
 def _cmd_finalize() -> int:
-    """Close the load: derive station activity, then assert referential integrity."""
+    """Close the load: derive station activity, assert integrity, optimize for reads."""
     engine = create_db_engine(get_settings())
     updated = derive_station_activity(engine)
     logger.info("Derived activity for %d station(s).", updated)
     assert_referential_integrity(engine)
     logger.info("Referential integrity holds.")
+    optimize_fact_for_reads(engine)
+    logger.info("Fact optimized for reads (lookup indexes + analyze).")
     return EXIT_OK
 
 
