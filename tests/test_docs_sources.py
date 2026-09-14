@@ -40,6 +40,14 @@ _SECOND_ENTRY = f"""  - source_id: example_prose
     sha256: "{_OTHER_DIGEST}"
 """
 
+_PARSE_BLOCK = """    parse:
+      sections:
+        - heading: Definitions
+          columns: [term, definition, source]
+        - heading: Explanation of abbreviations
+          columns: [abbreviation, expansion]
+          vertical_strategy: text
+"""
 
 def _write(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "sources.yaml"
@@ -148,3 +156,78 @@ def test_a_source_is_immutable(tmp_path: Path) -> None:
     source = load_source(_write(tmp_path, _MINIMAL), "example_glossary")
     with pytest.raises(ValidationError):
         source.sha256 = _OTHER_DIGEST
+
+
+def test_a_source_may_declare_no_structure(tmp_path: Path) -> None:
+    """Fetching and parsing are separate capabilities: a source can be pinned and
+    downloaded before anyone has described what is inside it."""
+    assert load_source(_write(tmp_path, _MINIMAL), "example_glossary").parse is None
+
+
+def test_parsing_an_undescribed_source_is_a_loud_error(tmp_path: Path) -> None:
+    """The absence must surface where the parse is attempted, not as a None later."""
+    source = load_source(_write(tmp_path, _MINIMAL), "example_glossary")
+    with pytest.raises(ConfigError, match="declares no 'parse' block"):
+        source.parse_spec()
+
+
+def test_sections_are_declared_in_document_order(tmp_path: Path) -> None:
+    source = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary")
+    assert source.parse_spec().headings == ["Definitions", "Explanation of abbreviations"]
+
+
+def test_each_section_carries_its_own_columns(tmp_path: Path) -> None:
+    """The two tables in the real document have different shapes; one column list
+    for the whole file would have to be wrong about one of them."""
+    spec = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary").parse_spec()
+    assert spec.select("Definitions").columns == ["term", "definition", "source"]
+    assert spec.select("Explanation of abbreviations").columns == ["abbreviation", "expansion"]
+
+
+def test_the_table_strategy_defaults_to_ruled_lines(tmp_path: Path) -> None:
+    """Most tables are drawn with a grid; the lineless one opts out explicitly."""
+    spec = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary").parse_spec()
+    assert spec.select("Definitions").vertical_strategy == "lines"
+    assert spec.select("Explanation of abbreviations").vertical_strategy == "text"
+
+
+def test_an_undeclared_section_is_rejected(tmp_path: Path) -> None:
+    spec = load_source(_write(tmp_path, _MINIMAL + _PARSE_BLOCK), "example_glossary").parse_spec()
+    with pytest.raises(ConfigError, match="Undeclared section"):
+        spec.select("Appendix B")
+
+
+def test_a_duplicated_column_name_is_rejected(tmp_path: Path) -> None:
+    """Duplicates would collapse two columns into one key and lose a column silently."""
+    body = (
+        _MINIMAL
+        + "    parse:\n      sections:\n        - heading: D\n          columns: [a, b, a]\n"
+    )
+    with pytest.raises(ConfigError, match="duplicate column name: a"):
+        load_registry(_write(tmp_path, body))
+
+
+def test_a_duplicated_section_heading_is_rejected(tmp_path: Path) -> None:
+    body = (
+        _MINIMAL
+        + "    parse:\n      sections:\n        - heading: D\n          columns: [a]\n"
+        + "        - heading: D\n          columns: [b]\n"
+    )
+    with pytest.raises(ConfigError, match="duplicate section heading: D"):
+        load_registry(_write(tmp_path, body))
+
+
+def test_an_unknown_table_strategy_is_rejected(tmp_path: Path) -> None:
+    body = (
+        _MINIMAL
+        + "    parse:\n      sections:\n        - heading: D\n          columns: [a]\n"
+        + "          vertical_strategy: magic\n"
+    )
+    with pytest.raises(ConfigError, match="Invalid source registry"):
+        load_registry(_write(tmp_path, body))
+
+
+def test_the_repo_registry_describes_the_glossary() -> None:
+    """The committed file is what the CLI boots with; its parse block must be usable."""
+    spec = load_registry(REPO_REGISTRY).select("infrabel_ns_glossary").parse_spec()
+    assert spec.select("Definitions").columns == ["term", "definition", "source"]

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, model_validator
@@ -24,6 +24,73 @@ from rail_rag.core.exceptions import ConfigError
 
 #: Lowercase hex, as produced by ``hashlib.sha256().hexdigest()``.
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
+
+
+#: ``pdfplumber`` finds cell boundaries either from ruled lines or from the gaps
+#: between words. Which one works is a property of how the publisher drew the
+#: table, so it is declared per section rather than guessed at parse time.
+TableStrategy = Literal["lines", "text"]
+
+
+class SectionSpec(BaseModel):
+    """What one titled section of a document is expected to contain.
+
+    The column names are the contract between the PDF and everything downstream:
+    they become the keys of every ``table_row``. Declaring them here rather than
+    hard-coding them keeps the parser generic and puts the document-specific
+    knowledge in a file a reviewer reads in a diff.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: Matched against the heading text in the document, and verified against the
+    #: table's own header row. A rename upstream fails the parse instead of
+    #: silently reassigning columns.
+    heading: str = Field(min_length=1)
+    columns: list[str] = Field(min_length=1)
+    vertical_strategy: TableStrategy = "lines"
+    horizontal_strategy: TableStrategy = "lines"
+
+    @model_validator(mode="after")
+    def _column_names_are_unique(self) -> Self:
+        counted = Counter(self.columns)
+        repeated = sorted(name for name, total in counted.items() if total > 1)
+        if repeated:
+            raise ValueError(f"duplicate column name: {', '.join(repeated)}")
+        return self
+
+
+class ParseSpec(BaseModel):
+    """The structure a document is expected to have, section by section."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sections: list[SectionSpec] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _headings_are_unique(self) -> Self:
+        counted = Counter(section.heading for section in self.sections)
+        repeated = sorted(name for name, total in counted.items() if total > 1)
+        if repeated:
+            raise ValueError(f"duplicate section heading: {', '.join(repeated)}")
+        return self
+
+    def select(self, heading: str) -> SectionSpec:
+        """Return the spec for one heading.
+
+        Raises:
+            ConfigError: if the heading is not declared.
+        """
+        for section in self.sections:
+            if section.heading == heading:
+                return section
+        declared = ", ".join(section.heading for section in self.sections)
+        raise ConfigError(f"Undeclared section {heading!r}; declared: {declared}")
+
+    @property
+    def headings(self) -> list[str]:
+        """The declared headings, in document order."""
+        return [section.heading for section in self.sections]
 
 
 class DocumentSource(BaseModel):
@@ -43,6 +110,8 @@ class DocumentSource(BaseModel):
     document_type: str = Field(min_length=1)
     #: Reviewed in a commit. A silently republished file fails the fetch.
     sha256: str = Field(pattern=_SHA256_PATTERN)
+    #: Optional: a source can be fetched before anyone has described its structure.
+    parse: ParseSpec | None = None
 
     @property
     def file_extension(self) -> str:
@@ -53,6 +122,19 @@ class DocumentSource(BaseModel):
     def file_stem(self) -> str:
         """Identity of the stored artefact: the source and the version it pins."""
         return f"{self.source_id}__{self.version}"
+
+    def parse_spec(self) -> ParseSpec:
+        """The declared structure, required.
+
+        Raises:
+            ConfigError: if the source has no ``parse`` block.
+        """
+        if self.parse is None:
+            raise ConfigError(
+                f"Source {self.source_id!r} declares no 'parse' block; it can be fetched "
+                f"but not parsed."
+            )
+        return self.parse
 
     @model_validator(mode="after")
     def _url_carries_a_file_extension(self) -> Self:
