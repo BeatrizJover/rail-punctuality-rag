@@ -105,18 +105,6 @@ _OPTIMIZE_STATEMENTS: tuple[str, ...] = (
 
 
 def optimize_fact_for_reads(engine: Engine) -> None:
-    """Build the covering indexes, refresh statistics and populate the visibility map.
-
-    Idempotent, and runs in AUTOCOMMIT: index builds and VACUUM on a partitioned
-    parent cannot run inside a transaction.
-
-    Raises:
-        DatabaseError: if any statement fails.
-    """
-    logger.info("optimized fact_stop_event for reads (covering indexes + vacuum analyze)")
-
-
-def optimize_fact_for_reads(engine: Engine) -> None:
     """Build the dimension-filter indexes and refresh planner statistics.
 
     Idempotent, and runs in AUTOCOMMIT: index builds on a partitioned parent do
