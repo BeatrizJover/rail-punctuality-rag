@@ -29,3 +29,6 @@ Thumbs.db
 
 # Gold export
 gold_export/
+
+# IDEs
+.vscode/
