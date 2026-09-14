@@ -1,0 +1,16 @@
+# External documents the knowledge base ingests.
+#
+# The files themselves are not committed: this registry is the reproducible
+# reference to them. A new upstream version is a new digest, declared here in a
+# commit - obtain it with `python scripts/manage.py docs-fetch --source ID --bootstrap`.
+
+sources:
+  - source_id: infrabel_ns_glossary
+    title: Network Statement - Appendix A.1 - Glossary
+    publisher: Infrabel
+    landing_page: https://infrabel.be/en/networkstatement
+    canonical_url: https://infrabel.be/sites/default/files/generated/files/paragraph/NS_A-01_glossary_20260402.pdf
+    version: "20260402"
+    language: en
+    document_type: glossary
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
