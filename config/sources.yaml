@@ -13,7 +13,7 @@ sources:
     version: "20260402"
     language: en
     document_type: glossary
-    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    sha256: "98fed51280e6fbfc5f2dc830c22d93f1bc355fe5697f36abae2b9845cbbc61f7"
     parse:
       sections:
         - heading: Definitions
