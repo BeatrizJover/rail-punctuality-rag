@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, model_validator
@@ -24,12 +24,6 @@ from rail_rag.core.exceptions import ConfigError
 
 #: Lowercase hex, as produced by ``hashlib.sha256().hexdigest()``.
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
-
-
-#: ``pdfplumber`` finds cell boundaries either from ruled lines or from the gaps
-#: between words. Which one works is a property of how the publisher drew the
-#: table, so it is declared per section rather than guessed at parse time.
-TableStrategy = Literal["lines", "text"]
 
 
 class SectionSpec(BaseModel):
@@ -47,9 +41,8 @@ class SectionSpec(BaseModel):
     #: table's own header row. A rename upstream fails the parse instead of
     #: silently reassigning columns.
     heading: str = Field(min_length=1)
+    #: Also an assertion: the measured grid must have exactly this many columns.
     columns: list[str] = Field(min_length=1)
-    vertical_strategy: TableStrategy = "lines"
-    horizontal_strategy: TableStrategy = "lines"
 
     @model_validator(mode="after")
     def _column_names_are_unique(self) -> Self:
