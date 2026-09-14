@@ -14,7 +14,7 @@ sql:
   max_rows: 200
 
   # Server-side, so a runaway query dies without the client having to cancel it.
-  statement_timeout_ms: 5000
+  statement_timeout_ms: 60000
 
   # Reachable from SQL without any table privilege, hence blocked by name.
   blocked_functions:

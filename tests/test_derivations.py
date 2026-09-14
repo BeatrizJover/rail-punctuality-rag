@@ -12,6 +12,7 @@ from rail_rag.ingestion.derivations import (
     ReferentialIntegrityError,
     assert_referential_integrity,
     derive_station_activity,
+    optimize_fact_for_reads,
 )
 
 _SEED = f"""
@@ -117,6 +118,127 @@ def test_derivation_reports_the_stations_it_touched(clean_schema: Engine) -> Non
 
 def test_empty_schema_derivation_is_a_no_op(clean_schema: Engine) -> None:
     assert derive_station_activity(clean_schema) == 0
+
+
+def _lookup_index_count(engine: Engine, column: str) -> int:
+    """Number of child partitions carrying a single-column non-unique index on ``column``."""
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_index i"
+                    " JOIN pg_class p ON p.oid = i.indrelid"
+                    " JOIN pg_attribute a ON a.attrelid = p.oid AND a.attnum = i.indkey[0]"
+                    " WHERE p.relname LIKE 'fact_stop_event\\_%'"
+                    " AND NOT i.indisunique AND i.indnatts = 1 AND a.attname = :column"
+                ),
+                {"column": column},
+            ).scalar_one()
+        )
+
+
+def _covering_index_count(engine: Engine, column: str) -> int:
+    """Child partitions carrying a covering index keyed on ``column``."""
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_index i"
+                    " JOIN pg_class p ON p.oid = i.indrelid"
+                    " JOIN pg_attribute a ON a.attrelid = p.oid AND a.attnum = i.indkey[0]"
+                    " WHERE p.relname LIKE 'fact_stop_event\\_%'"
+                    " AND NOT i.indisunique AND i.indnkeyatts = 1 AND i.indnatts = 4"
+                    " AND a.attname = :column"
+                ),
+                {"column": column},
+            ).scalar_one()
+        )
+
+
+def test_optimize_is_idempotent_and_analyzes(seeded: Engine) -> None:
+    """The statements are IF NOT EXISTS and VACUUM ANALYZE is safe to repeat, so a
+    second pass must be a no-op rather than an error."""
+    optimize_fact_for_reads(seeded)
+    optimize_fact_for_reads(seeded)
+    assert _covering_index_count(seeded, "station_key") == 36
+    assert _covering_index_count(seeded, "relation_key") == 36
+    with seeded.connect() as conn:
+        last_analyze = conn.execute(
+            text(
+                "SELECT last_analyze FROM pg_stat_all_tables"
+                " WHERE schemaname = :schema AND relname = 'fact_stop_event'"
+            ),
+            {"schema": GOLD_SCHEMA},
+        ).scalar_one()
+    assert last_analyze is not None
+
+
+def test_optimize_populates_the_visibility_map(seeded: Engine) -> None:
+    """Without VACUUM the visibility map stays empty and an Index Only Scan cannot
+    skip the heap, which would silently undo the point of the covering index."""
+    optimize_fact_for_reads(seeded)
+    with seeded.connect() as conn:
+        all_visible = conn.execute(
+            text(
+                "SELECT bool_and(relallvisible > 0) FROM pg_class"
+                " WHERE relkind = 'r' AND relname LIKE 'fact_stop_event\\_%'"
+                " AND relpages > 0"
+            )
+        ).scalar_one()
+    assert all_visible
+
+
+def test_optimize_raises_the_statistics_target_on_the_key_columns(seeded: Engine) -> None:
+    """Station traffic is heavily skewed; the default histogram misestimates it."""
+    optimize_fact_for_reads(seeded)
+    with seeded.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT a.attname, a.attstattarget FROM pg_attribute a"
+                " JOIN pg_class p ON p.oid = a.attrelid"
+                " JOIN pg_namespace n ON n.oid = p.relnamespace"
+                " WHERE p.relname = 'fact_stop_event' AND n.nspname = :schema"
+                " AND a.attname IN ('station_key', 'relation_key')"
+            ),
+            {"schema": GOLD_SCHEMA},
+        ).all()
+    targets: dict[str, int] = {str(row[0]): int(row[1]) for row in rows}
+    assert targets == {"station_key": 500, "relation_key": 500}
+
+
+def test_optimize_drops_the_superseded_plain_indexes(seeded: Engine) -> None:
+    """The covering index answers any lookup the plain one did; keeping both would
+    pay twice the write cost and twice the disk for nothing."""
+    optimize_fact_for_reads(seeded)
+    with seeded.connect() as conn:
+        leftovers = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_class"
+                " WHERE relname IN ('ix_fact_stop_event_station_key',"
+                " 'ix_fact_stop_event_relation_key')"
+            )
+        ).scalar_one()
+    assert leftovers == 0
+
+
+def test_optimize_lets_a_station_filter_skip_the_heap(seeded: Engine) -> None:
+    """The payoff: the aggregation the RAG generates must be answered by an Index
+    Only Scan. A Bitmap Heap Scan here is the 60s timeout reproducing in miniature."""
+    optimize_fact_for_reads(seeded)
+    with seeded.begin() as conn:
+        conn.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join(
+            conn.execute(
+                text(
+                    "EXPLAIN (VERBOSE, COSTS OFF)"
+                    " SELECT SUM(f.stop_events)"
+                    f" FROM {GOLD_SCHEMA}.fact_stop_event AS f"
+                    " WHERE f.station_key = repeat('a', 32)"
+                )
+            ).scalars()
+        )
+    assert "Index Only Scan" in plan
+    assert "Heap Scan" not in plan
 
 
 def test_derivation_orders_the_prompt_sample_by_real_activity(seeded: Engine) -> None:

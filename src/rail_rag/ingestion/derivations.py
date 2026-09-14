@@ -89,6 +89,51 @@ def _orphan_count(engine: Engine) -> int:
         return int(conn.execute(statement).scalar_one())
 
 
+_OPTIMIZE_STATEMENTS: tuple[str, ...] = (
+    f'ALTER TABLE "{GOLD_SCHEMA}".fact_stop_event ALTER COLUMN station_key SET STATISTICS 500',
+    f'ALTER TABLE "{GOLD_SCHEMA}".fact_stop_event ALTER COLUMN relation_key SET STATISTICS 500',
+    "CREATE INDEX IF NOT EXISTS ix_fact_stop_event_station_covering"
+    f' ON "{GOLD_SCHEMA}".fact_stop_event (station_key)'
+    " INCLUDE (stop_events, punctual_arrivals, measured_arrivals)",
+    "CREATE INDEX IF NOT EXISTS ix_fact_stop_event_relation_covering"
+    f' ON "{GOLD_SCHEMA}".fact_stop_event (relation_key)'
+    " INCLUDE (stop_events, punctual_arrivals, measured_arrivals)",
+    f'DROP INDEX IF EXISTS "{GOLD_SCHEMA}".ix_fact_stop_event_station_key',
+    f'DROP INDEX IF EXISTS "{GOLD_SCHEMA}".ix_fact_stop_event_relation_key',
+    f'VACUUM ANALYZE "{GOLD_SCHEMA}".fact_stop_event',
+)
+
+
+def optimize_fact_for_reads(engine: Engine) -> None:
+    """Build the covering indexes, refresh statistics and populate the visibility map.
+
+    Idempotent, and runs in AUTOCOMMIT: index builds and VACUUM on a partitioned
+    parent cannot run inside a transaction.
+
+    Raises:
+        DatabaseError: if any statement fails.
+    """
+    logger.info("optimized fact_stop_event for reads (covering indexes + vacuum analyze)")
+
+
+def optimize_fact_for_reads(engine: Engine) -> None:
+    """Build the dimension-filter indexes and refresh planner statistics.
+
+    Idempotent, and runs in AUTOCOMMIT: index builds on a partitioned parent do
+    not belong in a shared transaction.
+
+    Raises:
+        DatabaseError: if any statement fails.
+    """
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for statement in _OPTIMIZE_STATEMENTS:
+                conn.execute(text(statement))
+    except SQLAlchemyError as exc:
+        raise DatabaseError(f"Could not optimize fact for reads: {type(exc).__name__}") from exc
+    logger.info("optimized fact_stop_event for reads (indexes + analyze)")
+
+
 def assert_referential_integrity(engine: Engine) -> None:
     """Assert every fact row resolves to a row in each dimension.
 

@@ -50,6 +50,43 @@ def test_fact_grain_is_unique_on_the_upstream_merge_key() -> None:
     ]
 
 
+def test_fact_declares_a_covering_station_index() -> None:
+    """A station filter prunes no partition, so the measures ride in the index."""
+    idx = next(
+        i for i in fact_stop_event.indexes if i.name == "ix_fact_stop_event_station_covering"
+    )
+    assert not idx.unique
+    assert [c.name for c in idx.columns] == ["station_key"]
+    assert idx.dialect_options["postgresql"]["include"] == [
+        "stop_events",
+        "punctual_arrivals",
+        "measured_arrivals",
+    ]
+
+
+def test_fact_declares_a_covering_relation_index() -> None:
+    """Same reasoning as station_key: the relation filter is symmetric."""
+    idx = next(
+        i for i in fact_stop_event.indexes if i.name == "ix_fact_stop_event_relation_covering"
+    )
+    assert not idx.unique
+    assert [c.name for c in idx.columns] == ["relation_key"]
+    assert idx.dialect_options["postgresql"]["include"] == [
+        "stop_events",
+        "punctual_arrivals",
+        "measured_arrivals",
+    ]
+
+
+def test_covering_indexes_include_the_punctuality_ratio_operands() -> None:
+    """SUM(punctual_arrivals)/SUM(measured_arrivals) must stay off the heap too."""
+    covering = [i for i in fact_stop_event.indexes if i.name and i.name.endswith("_covering")]
+    assert len(covering) == 2
+    for idx in covering:
+        included = set(idx.dialect_options["postgresql"]["include"])
+        assert {"punctual_arrivals", "measured_arrivals"} <= included
+
+
 def test_measures_that_the_export_never_leaves_null() -> None:
     """Keys and stop_events are complete in every sampled row."""
     for column in ("date_key", "station_key", "relation_key", "train_no", "stop_events"):

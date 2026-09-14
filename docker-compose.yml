@@ -9,6 +9,7 @@ services:
     image: pgvector/pgvector:pg16
     container_name: rail-rag-postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "max_wal_size=4GB"]
     environment:
       POSTGRES_DB: ${RAIL_RAG_DB_NAME:-rail_rag}
       POSTGRES_USER: ${RAIL_RAG_DB_USER:-rail_rag}

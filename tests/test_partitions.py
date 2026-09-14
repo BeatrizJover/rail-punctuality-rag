@@ -133,6 +133,28 @@ def test_the_unique_index_reaches_every_child(clean_schema: Engine) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("column", ["station_key", "relation_key"])
+def test_covering_indexes_reach_every_child(clean_schema: Engine, column: str) -> None:
+    """A covering index on the parent must propagate to every child, INCLUDE and all.
+
+    indnkeyatts is the key column count and indnatts the total: 1 key plus the three
+    included measures is what makes an Index Only Scan possible.
+    """
+    with clean_schema.connect() as conn:
+        count = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_index i"
+                " JOIN pg_class p ON p.oid = i.indrelid"
+                " JOIN pg_attribute a ON a.attrelid = p.oid AND a.attnum = i.indkey[0]"
+                " WHERE p.relname LIKE 'fact_stop_event\\_%'"
+                " AND NOT i.indisunique AND i.indnkeyatts = 1 AND i.indnatts = 4"
+                " AND a.attname = :column"
+            ),
+            {"column": column},
+        ).scalar_one()
+    assert count == 36
+
+
 def test_a_date_outside_every_partition_is_rejected(clean_schema: Engine) -> None:
     """No DEFAULT partition on purpose: an unplanned date must fail loudly."""
     with clean_schema.begin() as conn:
