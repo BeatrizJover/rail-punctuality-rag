@@ -36,3 +36,4 @@ gold_export/
 
 # Third-party source documents (see config/sources.yaml)
 data/docs/raw/
+data/docs/parsed/
