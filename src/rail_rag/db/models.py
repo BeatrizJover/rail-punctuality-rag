@@ -122,6 +122,16 @@ fact_stop_event = Table(
     Column("measured_arrivals", SmallInteger, nullable=False),
     Column("loaded_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Index(None, "date_key", "station_key", "train_no", unique=True),
+    Index(
+        "ix_fact_stop_event_station_covering",
+        "station_key",
+        postgresql_include=["stop_events", "punctual_arrivals", "measured_arrivals"],
+    ),
+    Index(
+        "ix_fact_stop_event_relation_covering",
+        "relation_key",
+        postgresql_include=["stop_events", "punctual_arrivals", "measured_arrivals"],
+    ),
     ForeignKeyConstraint(["date_key"], [dim_date.c.date_key], name="fk_fact_date"),
     ForeignKeyConstraint(["station_key"], [dim_station.c.station_key], name="fk_fact_station"),
     ForeignKeyConstraint(["relation_key"], [dim_relation.c.relation_key], name="fk_fact_relation"),
