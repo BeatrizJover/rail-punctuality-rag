@@ -201,6 +201,56 @@ def test_search_honours_top_k_and_cites_the_source(
     assert (results[0].doc_id, results[0].heading) == ("data-source", "Two exports")
 
 
+def test_search_excludes_a_whole_document(postgres_engine: Engine, kb_schema: KbSchema) -> None:
+    sync_chunks(postgres_engine, kb_schema, _corpus())
+    _embed_all(postgres_engine, kb_schema)
+    results = search(
+        postgres_engine, kb_schema, _unit(kb_schema, 0), top_k=3, exclude_docs=["data-source"]
+    )
+    assert [row.doc_id for row in results] == ["punctuality"]
+
+
+def test_search_without_exclusions_is_unchanged(
+    postgres_engine: Engine, kb_schema: KbSchema
+) -> None:
+    """The default must take the same path as before, not an empty ``NOT IN``."""
+    sync_chunks(postgres_engine, kb_schema, _corpus())
+    _embed_all(postgres_engine, kb_schema)
+    vector = _unit(kb_schema, 0)
+    assert search(postgres_engine, kb_schema, vector, top_k=3) == search(
+        postgres_engine, kb_schema, vector, top_k=3, exclude_docs=()
+    )
+
+
+def test_excluding_every_document_returns_nothing(
+    postgres_engine: Engine, kb_schema: KbSchema
+) -> None:
+    """An empty result, not a silent fallback to the unfiltered ranking."""
+    sync_chunks(postgres_engine, kb_schema, _corpus())
+    _embed_all(postgres_engine, kb_schema)
+    results = search(
+        postgres_engine,
+        kb_schema,
+        _unit(kb_schema, 0),
+        top_k=3,
+        exclude_docs=["data-source", "punctuality"],
+    )
+    assert results == []
+
+
+def test_exclusion_is_applied_before_the_limit(
+    postgres_engine: Engine, kb_schema: KbSchema
+) -> None:
+    """``top_k`` fills up with what survives; a filtered hit must not cost a slot."""
+    sync_chunks(postgres_engine, kb_schema, _corpus())
+    _embed_all(postgres_engine, kb_schema)
+    # The nearest chunk is data-source/0, so post-limit filtering would return nothing.
+    results = search(
+        postgres_engine, kb_schema, _unit(kb_schema, 0), top_k=1, exclude_docs=["data-source"]
+    )
+    assert [row.doc_id for row in results] == ["punctuality"]
+
+
 def test_search_skips_unembedded_rows(postgres_engine: Engine, kb_schema: KbSchema) -> None:
     """A NULL vector has no distance; ranking it would surface unrelated text."""
     sync_chunks(postgres_engine, kb_schema, _corpus())

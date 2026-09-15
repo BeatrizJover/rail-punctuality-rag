@@ -8,7 +8,8 @@ each question would pay for it on the hot path.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 
 from sqlalchemy import Engine
 
@@ -23,11 +24,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOP_K = 4
 
 
+@dataclass(frozen=True)
+class ScopedPassages:
+    """The same question ranked over every source and over internal documents only.
+
+    ``internal_only`` is a subset of ``all_sources``, not its complement.
+    """
+
+    all_sources: Sequence[RetrievedChunk]
+    internal_only: Sequence[RetrievedChunk]
+
+
 class Retriever:
     """Embeds a question and returns the nearest stored passages."""
 
     def __init__(
-        self, engine: Engine, kb: KbSchema, embedder: Embedder, *, top_k: int = DEFAULT_TOP_K
+        self,
+        engine: Engine,
+        kb: KbSchema,
+        embedder: Embedder,
+        *,
+        top_k: int = DEFAULT_TOP_K,
+        external_ids: Collection[str] = (),
     ) -> None:
         """Verify that the stored vectors and the configured model agree.
 
@@ -47,6 +65,7 @@ class Retriever:
         self._kb = kb
         self._embedder = embedder
         self._top_k = top_k
+        self._external_ids = tuple(external_ids)
 
     @property
     def top_k(self) -> int:
@@ -68,3 +87,26 @@ class Retriever:
         results = search(self._engine, self._kb, vector, top_k=top_k or self._top_k)
         logger.debug("Retrieved %d passages", len(results))
         return results
+
+    def retrieve_scoped(self, question: str, *, top_k: int | None = None) -> ScopedPassages:
+        """Rank one question twice, over both scopes, for the price of one embedding.
+
+        With no declared external ids the two scopes are the same object and the
+        second scan never runs, so the default costs exactly what ``retrieve`` does.
+
+        Raises:
+            ProviderError: if the embedding provider fails.
+            DatabaseError: if a search query fails.
+        """
+        if not question.strip():
+            return ScopedPassages((), ())
+        limit = top_k or self._top_k
+        vector = self._embedder.embed_query(question)
+        every = search(self._engine, self._kb, vector, top_k=limit)
+        internal = every
+        if self._external_ids:
+            internal = search(
+                self._engine, self._kb, vector, top_k=limit, exclude_docs=self._external_ids
+            )
+        logger.debug("Retrieved %d passages, %d of them internal", len(every), len(internal))
+        return ScopedPassages(all_sources=every, internal_only=internal)

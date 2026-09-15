@@ -7,18 +7,22 @@ integration tests that create a schema and execute real SQL.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 
 import pytest
 from sqlalchemy import Engine
 
 from rail_rag.rag.exceptions import AnswerError
-from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _sources_from
+from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
 from rail_rag.rag.providers.fake import FakeEmbedder, FakeGenerator
 from rail_rag.rag.router import Route, classify_lexically
 from rail_rag.rag.sql.policy import SqlPolicy
+from rail_rag.rag.store.chunking import Chunk
 from rail_rag.rag.store.models import KbSchema
+from rail_rag.rag.store.repository import pending_chunks, save_embeddings, sync_chunks
 
 _DATA_Q = "How many stations are there?"
 _CONCEPTUAL_Q = "How is punctuality defined?"
@@ -74,12 +78,23 @@ _ALLOWED = frozenset(
 
 
 def _build(
-    engine: Engine, kb: KbSchema, responses: list[str]
+    engine: Engine,
+    kb: KbSchema,
+    responses: list[str],
+    *,
+    external_ids: Collection[str] = (),
 ) -> tuple[AnswerPipeline, FakeGenerator]:
     """Construct a pipeline against a live schema with a scripted generator."""
     generator = FakeGenerator(responses)
     embedder = FakeEmbedder(dimension=kb.dimension, model_name="fake-embedding")
-    pipeline = AnswerPipeline(engine, generator, embedder, kb, SqlPolicy(allowed_tables=_ALLOWED))
+    pipeline = AnswerPipeline(
+        engine,
+        generator,
+        embedder,
+        kb,
+        SqlPolicy(allowed_tables=_ALLOWED),
+        external_ids=external_ids,
+    )
     return pipeline, generator
 
 
@@ -165,3 +180,115 @@ def test_an_empty_question_raises_answer_error(clean_schema: Engine, kb_schema: 
     pipeline, _ = _build(clean_schema, kb_schema, ["unused"])
     with pytest.raises(AnswerError, match="empty"):
         pipeline.answer("   ")
+
+
+# --- scoped retrieval: the SQL path sees internal documentation only ----------
+
+_INTERNAL_DOC = "02-data-model"
+_EXTERNAL_DOC = "external-glossary"
+_INTERNAL_BODY = "relation_direction is modelled on dim_relation."
+_EXTERNAL_BODY = "Train path means the infrastructure capacity needed."
+
+
+def _populate_kb(engine: Engine, kb: KbSchema) -> None:
+    """Two embedded documents, one of which the pipeline will be told is external."""
+    chunks = [
+        Chunk(doc_id=_INTERNAL_DOC, chunk_index=0, heading="Relations", content=_INTERNAL_BODY),
+        Chunk(doc_id=_EXTERNAL_DOC, chunk_index=0, heading="Train path", content=_EXTERNAL_BODY),
+    ]
+    sync_chunks(engine, kb, chunks)
+    embedder = FakeEmbedder(dimension=kb.dimension, model_name="fake-embedding")
+    save_embeddings(
+        engine,
+        kb,
+        [
+            (row.id, embedder.embed_query(row.chunk.embedding_text))
+            for row in pending_chunks(engine, kb, model_name="fake-embedding")
+        ],
+        model_name="fake-embedding",
+    )
+
+
+@pytest.mark.integration
+def test_the_data_path_never_sees_an_external_passage(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    """A join invented from a glossary the schema does not match is a fabricated answer."""
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, generator = _build(
+        clean_schema,
+        kb_schema,
+        ["```sql\nSELECT 1 AS n\n```", "The answer is 1."],
+        external_ids=[_EXTERNAL_DOC],
+    )
+    answer = pipeline.answer(_DATA_Q)
+
+    sql_prompt, narration_prompt = generator.calls[0][1], generator.calls[1][1]
+    assert _INTERNAL_BODY in sql_prompt
+    assert _EXTERNAL_BODY not in sql_prompt
+    assert _EXTERNAL_BODY not in narration_prompt
+    assert answer.route is Route.DATA
+    # Scoping must not buy itself an extra model call.
+    assert len(generator.calls) == 2
+
+
+@pytest.mark.integration
+def test_a_data_answer_cites_only_internal_sources(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    """Citing a passage the data path never read would make the citation a lie."""
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, _ = _build(
+        clean_schema,
+        kb_schema,
+        ["```sql\nSELECT 1 AS n\n```", "The answer is 1."],
+        external_ids=[_EXTERNAL_DOC],
+    )
+    answer = pipeline.answer(_DATA_Q)
+    assert {source.doc_id for source in answer.sources} == {_INTERNAL_DOC}
+
+
+@pytest.mark.integration
+def test_the_no_sql_fallback_keeps_every_source(clean_schema: Engine, kb_schema: KbSchema) -> None:
+    """The router's asymmetry survives scoping: the conceptual path keeps the glossary."""
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, generator = _build(
+        clean_schema,
+        kb_schema,
+        [NO_SQL, "It is a modelling decision."],
+        external_ids=[_EXTERNAL_DOC],
+    )
+    answer = pipeline.answer(_SUPERLATIVE_Q)
+
+    assert _EXTERNAL_BODY in generator.calls[1][1]
+    assert {source.doc_id for source in answer.sources} == {_INTERNAL_DOC, _EXTERNAL_DOC}
+
+
+# --- the output contract: a broken reply must leave evidence -------------------
+
+
+@pytest.mark.integration
+def test_a_reply_that_breaks_the_contract_is_logged(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Diagnosing a broken output contract must not cost a second call to the provider."""
+    pipeline, _ = _build(clean_schema, kb_schema, ["I would rather explain the schema instead."])
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"), pytest.raises(AnswerError):
+        pipeline.answer(_DATA_Q)
+    assert "rather explain the schema" in caplog.text
+
+
+def test_a_long_rejected_reply_is_truncated_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """A model that answers with an essay must stay readable in a terminal."""
+    reply = "Not a query. " * 200
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"), pytest.raises(AnswerError):
+        _parse_sql(reply)
+    assert "chars in total" in caplog.text
+    assert len(caplog.text) < len(reply)
+
+
+def test_a_valid_reply_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """The log line is evidence of a failure; on the happy path it would be noise."""
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"):
+        assert _parse_sql("```sql\nSELECT 1\n```") == "SELECT 1"
+    assert caplog.text == ""
