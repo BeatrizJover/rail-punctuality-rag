@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
 from rail_rag.ingestion.docs.canonical import Block, TableRow, decode_block, write_blocks
 from rail_rag.ingestion.docs.exceptions import ParseError
-from rail_rag.ingestion.docs.sources import ParseSpec, SectionSpec
+from rail_rag.ingestion.docs.sources import ParseSpec, SectionSpec, SourceRegistry, load_registry
 from rail_rag.rag.exceptions import RagError
-from rail_rag.rag.store.glossary import doc_id_for, glossary_chunks, load_glossary
+from rail_rag.rag.store.glossary import (
+    doc_id_for,
+    glossary_chunks,
+    load_declared_glossaries,
+    load_glossary,
+)
 
 DOC_ID = "infrabel_ns_glossary"
 
@@ -229,3 +235,88 @@ def test_the_artefact_is_read_and_chunked_from_disk(tmp_path: Path) -> None:
 def test_a_missing_artefact_is_a_loud_error(tmp_path: Path) -> None:
     with pytest.raises(ParseError, match="Could not read"):
         load_glossary(tmp_path / "infrabel_ns_glossary__20260402.jsonl", SPEC)
+
+
+# --- resolving the registry ------------------------------------------------
+
+_DIGEST = "a" * 64
+
+GLOSSARY_ENTRY = f"""
+sources:
+  - source_id: infrabel_ns_glossary
+    title: Network Statement
+    publisher: Infrabel
+    landing_page: https://example.org/landing
+    canonical_url: https://example.org/files/ns_20260402.pdf
+    version: "20260402"
+    language: en
+    document_type: glossary
+    sha256: "{_DIGEST}"
+    parse:
+      sections:
+        - heading: Definitions
+          columns: [term, definition, source]
+        - heading: Explanation of abbreviations
+          columns: [abbreviation, expansion]
+"""
+
+UNDESCRIBED_ENTRY = f"""  - source_id: example_prose
+    title: Example Prose
+    publisher: Example Publisher
+    landing_page: https://example.org/landing
+    canonical_url: https://example.org/files/prose.pdf
+    version: "1.0"
+    language: fr
+    document_type: prose
+    sha256: "{_DIGEST}"
+"""
+
+
+def _registry(tmp_path: Path, body: str) -> SourceRegistry:
+    path = tmp_path / "sources.yaml"
+    path.write_text(body, encoding="utf-8")
+    return load_registry(path)
+
+
+def _parsed_dir(tmp_path: Path, *lines: str, version: str = "20260402") -> Path:
+    directory = tmp_path / "parsed"
+    write_blocks(directory / f"{DOC_ID}__{version}.jsonl", _blocks(*lines))
+    return directory
+
+
+def test_a_declared_document_is_chunked(tmp_path: Path) -> None:
+    parsed = _parsed_dir(tmp_path, ABBREV_HEADING, RT_FIRST_SENSE, RT_SECOND_SENSE, RU_ROW)
+    chunks = load_declared_glossaries(_registry(tmp_path, GLOSSARY_ENTRY), parsed)
+    assert [chunk.doc_id for chunk in chunks] == [DOC_ID, DOC_ID]
+    assert chunks[0].content == "Real-Time\n\nReservable Tracks"
+
+
+def test_a_source_without_a_parse_block_is_skipped(tmp_path: Path) -> None:
+    """Fetching and parsing are separate capabilities; an undescribed source has no chunks."""
+    parsed = _parsed_dir(tmp_path, RU_ROW)
+    registry = _registry(tmp_path, GLOSSARY_ENTRY + UNDESCRIBED_ENTRY)
+    assert {chunk.doc_id for chunk in load_declared_glossaries(registry, parsed)} == {DOC_ID}
+
+
+def test_a_declared_artefact_that_was_never_parsed_names_the_command(tmp_path: Path) -> None:
+    with pytest.raises(ParseError, match=f"docs-parse --source {DOC_ID}"):
+        load_declared_glossaries(_registry(tmp_path, GLOSSARY_ENTRY), tmp_path / "parsed")
+
+
+def test_the_declared_version_decides_which_artefact_is_read(tmp_path: Path) -> None:
+    """A JSONL from an older version would collide on (doc_id, chunk_index)."""
+    parsed = _parsed_dir(tmp_path, RU_ROW, version="20250101")
+    with pytest.raises(ParseError, match="20260402"):
+        load_declared_glossaries(_registry(tmp_path, GLOSSARY_ENTRY), parsed)
+
+
+def test_an_oversized_entry_is_logged_rather_than_split(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Half a definition reads as a whole one, so the warning is the whole remedy."""
+    parsed = _parsed_dir(tmp_path, APPLICANT_ROW)
+    with caplog.at_level(logging.WARNING, logger="rail_rag.rag.store.glossary"):
+        chunks = load_declared_glossaries(_registry(tmp_path, GLOSSARY_ENTRY), parsed, max_chars=20)
+    assert len(chunks) == 1
+    assert len(chunks[0].content) > 20
+    assert "Applicant" in caplog.text

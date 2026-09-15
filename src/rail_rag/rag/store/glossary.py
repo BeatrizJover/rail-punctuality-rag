@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rail_rag.core.exceptions import ConfigError
-from rail_rag.ingestion.docs.canonical import Block, Heading, Paragraph, TableRow, read_blocks
-from rail_rag.ingestion.docs.sources import ParseSpec
+from rail_rag.ingestion.docs.canonical import (
+    Block,
+    Heading,
+    Paragraph,
+    TableRow,
+    artefact_paths,
+    read_blocks,
+)
+from rail_rag.ingestion.docs.exceptions import ParseError
+from rail_rag.ingestion.docs.sources import ParseSpec, SourceRegistry
 from rail_rag.rag.exceptions import RagError
-from rail_rag.rag.store.chunking import Chunk
+from rail_rag.rag.store.chunking import DEFAULT_MAX_CHARS, Chunk
 
 #: Joins two rows folded into one entry. A single newline is already taken: the
 #: parser uses it for a line wrapped inside one cell.
@@ -27,6 +36,8 @@ HEADING_SEPARATOR = " — "
 _STEM_SEPARATOR = "__"
 
 _WHITESPACE = re.compile(r"\s+")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -158,3 +169,39 @@ def load_glossary(path: Path, spec: ParseSpec, *, doc_id: str | None = None) -> 
         RagError: if its blocks do not match the declared sections.
     """
     return glossary_chunks(read_blocks(path), spec, doc_id=doc_id or doc_id_for(path))
+
+
+def load_declared_glossaries(
+    registry: SourceRegistry, parsed_dir: Path, *, max_chars: int = DEFAULT_MAX_CHARS
+) -> list[Chunk]:
+    """Chunk every document the registry declares a ``parse`` block for.
+
+    Artefacts are resolved by declared version, never by scanning the directory:
+    a JSONL left over from an older version would collide on ``chunk_index``.
+
+    Raises:
+        ParseError: if a declared artefact has not been parsed yet, or is malformed.
+        RagError: if an artefact does not match its declared sections.
+    """
+    chunks: list[Chunk] = []
+    for source in registry.sources:
+        if source.parse is None:
+            continue
+        stream_path, _meta_path = artefact_paths(source.source_id, source.version, parsed_dir)
+        if not stream_path.is_file():
+            raise ParseError(
+                f"{stream_path} does not exist; run 'docs-parse --source {source.source_id}' first."
+            )
+        loaded = load_glossary(stream_path, source.parse_spec(), doc_id=source.source_id)
+        for chunk in loaded:
+            if len(chunk.content) > max_chars:
+                logger.warning(
+                    "Entry %r is %d characters against a %d limit; stored whole rather"
+                    " than split, because half a definition reads as a whole one",
+                    chunk.heading,
+                    len(chunk.content),
+                    max_chars,
+                )
+        logger.info("Loaded %d chunk(s) from %s", len(loaded), stream_path)
+        chunks.extend(loaded)
+    return chunks

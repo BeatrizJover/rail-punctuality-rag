@@ -12,6 +12,7 @@ from rail_rag.core.exceptions import DatabaseError
 from rail_rag.rag.exceptions import ProviderError, RagError
 from rail_rag.rag.providers.fake import FakeEmbedder
 from rail_rag.rag.store.builder import build_knowledge_base
+from rail_rag.rag.store.chunking import Chunk
 from rail_rag.rag.store.models import KbSchema, build_kb_schema
 from rail_rag.rag.store.repository import kb_stats
 from rail_rag.rag.store.schema import drop_kb_schema
@@ -209,3 +210,58 @@ def test_chunk_size_reaches_the_chunker(
         postgres_engine, kb_schema, CountingEmbedder(), corpus, max_chars=200, min_chars=10
     )
     assert kb_stats(postgres_engine, kb_schema).total > coarse
+
+
+def _glossary_chunks() -> list[Chunk]:
+    return [
+        Chunk(doc_id="glossary", chunk_index=0, heading="Abbreviations — RT", content="Real-Time"),
+        Chunk(
+            doc_id="glossary",
+            chunk_index=1,
+            heading="Abbreviations — RU",
+            content="Railway Undertaking",
+        ),
+    ]
+
+
+def test_extra_chunks_are_stored_and_embedded_with_the_corpus(
+    postgres_engine: Engine, kb_schema: KbSchema, tmp_path: Path
+) -> None:
+    report = build_knowledge_base(
+        postgres_engine,
+        kb_schema,
+        CountingEmbedder(),
+        _corpus_dir(tmp_path),
+        extra_chunks=_glossary_chunks(),
+    )
+    stats = kb_stats(postgres_engine, kb_schema)
+    assert report.sync.inserted == stats.total
+    assert report.embedded == stats.total
+    assert stats.pending == 0
+
+
+def test_extra_chunks_no_longer_passed_are_deleted(
+    postgres_engine: Engine, kb_schema: KbSchema, tmp_path: Path
+) -> None:
+    """One sync makes the arguments the whole truth; hence a missing artefact must abort."""
+    corpus = _corpus_dir(tmp_path)
+    build_knowledge_base(
+        postgres_engine, kb_schema, CountingEmbedder(), corpus, extra_chunks=_glossary_chunks()
+    )
+    report = build_knowledge_base(postgres_engine, kb_schema, CountingEmbedder(), corpus)
+    assert report.sync.deleted == len(_glossary_chunks())
+
+
+def test_a_position_claimed_twice_is_refused_before_any_quota(
+    postgres_engine: Engine, kb_schema: KbSchema, tmp_path: Path
+) -> None:
+    duplicate = [
+        Chunk(doc_id="glossary", chunk_index=0, heading=None, content="one"),
+        Chunk(doc_id="glossary", chunk_index=0, heading=None, content="two"),
+    ]
+    embedder = CountingEmbedder()
+    with pytest.raises(RagError, match="Duplicate"):
+        build_knowledge_base(
+            postgres_engine, kb_schema, embedder, _corpus_dir(tmp_path), extra_chunks=duplicate
+        )
+    assert embedder.batches == []
