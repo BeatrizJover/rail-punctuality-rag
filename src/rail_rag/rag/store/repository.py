@@ -8,7 +8,7 @@ whole upsert and search surface be tested with no network and no API key.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -244,9 +244,14 @@ def save_embeddings(
 
 
 def search(
-    engine: Engine, kb: KbSchema, vector: Sequence[float], *, top_k: int
+    engine: Engine,
+    kb: KbSchema,
+    vector: Sequence[float],
+    *,
+    top_k: int,
+    exclude_docs: Collection[str] = (),
 ) -> list[RetrievedChunk]:
-    """Return the ``top_k`` passages closest to ``vector`` by cosine distance.
+    """Return the ``top_k`` passages closest to ``vector``, skipping excluded documents.
 
     Unembedded rows are excluded rather than ranked last: a NULL vector has no
     distance, and treating it as one would put unrelated text at the top.
@@ -262,13 +267,15 @@ def search(
 
     table = kb.kb_chunk
     distance = table.c.embedding.cosine_distance(list(vector)).label("distance")
-    statement = (
-        select(table.c.doc_id, table.c.heading, table.c.content, distance)
-        .where(table.c.embedding.is_not(None))
-        # ``id`` breaks ties, so equal distances come back in a stable order.
-        .order_by(distance, table.c.id)
-        .limit(top_k)
+    statement = select(table.c.doc_id, table.c.heading, table.c.content, distance).where(
+        table.c.embedding.is_not(None)
     )
+    if exclude_docs:
+        # Filtered before the limit, so ``top_k`` fills up with what survives.
+        statement = statement.where(table.c.doc_id.not_in(sorted(exclude_docs)))
+    # ``id`` breaks ties, so equal distances come back in a stable order.
+    statement = statement.order_by(distance, table.c.id).limit(top_k)
+
     try:
         with engine.connect() as conn:
             rows = conn.execute(statement).all()

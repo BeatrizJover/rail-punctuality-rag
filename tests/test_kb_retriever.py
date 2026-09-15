@@ -113,3 +113,49 @@ def test_a_missing_knowledge_base_is_refused_at_construction(
 def test_non_positive_top_k_is_refused(postgres_engine: Engine, kb_schema: KbSchema) -> None:
     with pytest.raises(RagError, match="top_k"):
         Retriever(postgres_engine, kb_schema, _embedder(), top_k=0)
+
+
+def test_both_scopes_cost_a_single_embedding(postgres_engine: Engine, populated: KbSchema) -> None:
+    """Two scans of one vector; paying the provider twice would be invisible in the result."""
+
+    class CountingEmbedder(FakeEmbedder):
+        def __init__(self, dimension: int) -> None:
+            super().__init__(dimension=dimension, model_name="fake-embedding")
+            self.queries = 0
+
+        def embed_query(self, text: str) -> list[float]:
+            self.queries += 1
+            return super().embed_query(text)
+
+    embedder = CountingEmbedder(populated.dimension)
+    retriever = Retriever(postgres_engine, populated, embedder, external_ids=["coverage"])
+    scoped = retriever.retrieve_scoped("anything at all")
+
+    assert embedder.queries == 1
+    assert "coverage" in {passage.doc_id for passage in scoped.all_sources}
+    assert "coverage" not in {passage.doc_id for passage in scoped.internal_only}
+
+
+def test_a_scoped_empty_question_costs_nothing(
+    postgres_engine: Engine, populated: KbSchema
+) -> None:
+    class RefusingEmbedder(FakeEmbedder):
+        def embed_query(self, text: str) -> list[float]:
+            raise AssertionError("the provider must not be called")
+
+    retriever = Retriever(
+        postgres_engine,
+        populated,
+        RefusingEmbedder(dimension=populated.dimension, model_name="fake-embedding"),
+        external_ids=["coverage"],
+    )
+    scoped = retriever.retrieve_scoped("   \n  ")
+    assert (scoped.all_sources, scoped.internal_only) == ((), ())
+
+
+def test_without_external_ids_the_scopes_are_the_same_object(
+    postgres_engine: Engine, populated: KbSchema
+) -> None:
+    """The default must not pay for a second scan that cannot differ."""
+    scoped = Retriever(postgres_engine, populated, _embedder()).retrieve_scoped("anything at all")
+    assert scoped.internal_only is scoped.all_sources
