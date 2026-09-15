@@ -22,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, mod
 
 from rail_rag.core.exceptions import ConfigError
 
+#: Repository-relative, like every other committed configuration path.
+DEFAULT_SOURCES_REGISTRY = Path("config/sources.yaml")
+
 #: Lowercase hex, as produced by ``hashlib.sha256().hexdigest()``.
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,8 +18,10 @@ from sqlalchemy import Engine
 
 from rail_rag.api import main
 from rail_rag.api.main import create_app
-from rail_rag.api.state import AppState
-from rail_rag.core.exceptions import DatabaseError
+from rail_rag.api.state import AppState, build_state
+from rail_rag.core.config import Settings
+from rail_rag.core.exceptions import ConfigError, DatabaseError
+from rail_rag.ingestion.docs.sources import DEFAULT_SOURCES_REGISTRY, load_registry
 from rail_rag.rag.exceptions import AnswerError
 from rail_rag.rag.pipeline import Answer, Source
 from rail_rag.rag.router import Route
@@ -26,6 +29,8 @@ from rail_rag.rag.sql.executor import QueryResult
 from rail_rag.rag.store.models import build_kb_schema
 
 _DIMENSION = 8
+#: Resolved from ``__file__``: the autouse settings fixture chdirs into a tmp_path.
+_REPO_CONFIG = Path(__file__).resolve().parent.parent / "config"
 
 
 @dataclass
@@ -170,3 +175,35 @@ def test_ready_names_the_missing_tables(monkeypatch: pytest.MonkeyPatch) -> None
     assert body["missing_tables"] == ["dim_station"]
     assert "db-init" in (body["detail"] or "")
     assert body["knowledge_base"] is False
+
+
+# --- startup: the source registry is not optional -----------------------------
+
+
+def _build_state_against(registry: Path) -> None:
+    """Boot the API with the committed configuration but a caller-chosen registry."""
+    build_state(
+        Settings(llm_config_path=_REPO_CONFIG / "model_config.yaml"),
+        retrieval_config=_REPO_CONFIG / "retrieval_config.yaml",
+        sources_registry=registry,
+    )
+
+
+def test_a_missing_source_registry_stops_the_api_from_starting(tmp_path: Path) -> None:
+    """Falling back to an empty exclusion list would disable the filter in silence."""
+    with pytest.raises(ConfigError, match="Source registry not found"):
+        _build_state_against(tmp_path / "absent.yaml")
+
+
+def test_an_invalid_source_registry_stops_the_api_from_starting(tmp_path: Path) -> None:
+    """A malformed registry must not be read as 'there are no external sources'."""
+    registry = tmp_path / "sources.yaml"
+    registry.write_text("sources: []\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="Invalid source registry"):
+        _build_state_against(registry)
+
+
+def test_the_committed_registry_is_what_both_entry_points_boot_from() -> None:
+    """One constant, so the CLI and the API can never filter on different sets."""
+    committed = Path(__file__).resolve().parent.parent / DEFAULT_SOURCES_REGISTRY
+    assert load_registry(committed).names

@@ -51,7 +51,7 @@ from rail_rag.ingestion.docs.fetcher import (
     sha256_of,
 )
 from rail_rag.ingestion.docs.pdf_reader import parse_document
-from rail_rag.ingestion.docs.sources import load_registry, load_source
+from rail_rag.ingestion.docs.sources import DEFAULT_SOURCES_REGISTRY, load_registry, load_source
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
 from rail_rag.ingestion.manifest import (
@@ -76,7 +76,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 
 DEFAULT_CORPUS_DIR = Path("docs/knowledge")
-DEFAULT_SOURCES_REGISTRY = Path("config/sources.yaml")
+
 
 #: Enough of a passage to recognise it in the terminal without flooding it.
 _PREVIEW_CHARS = 160
@@ -327,11 +327,12 @@ def _cmd_ask(
     config, kb = _model_setup(profile)
     engine = create_db_engine(settings)
     retrieval = load_retrieval_config(Path("config/retrieval_config.yaml"))
+    external_ids = load_registry(DEFAULT_SOURCES_REGISTRY).names
 
     generator = build_generator(config, settings.llm_api_key)
     embedder = build_embedder(config, settings.llm_api_key)
 
-    pipe = AnswerPipeline(engine, generator, embedder, kb, retrieval.sql)
+    pipe = AnswerPipeline(engine, generator, embedder, kb, retrieval.sql, external_ids=external_ids)
     answer = pipe.answer(question)
 
     logger.info("[%s]", answer.route.value)
