@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 #: Guard attempts: the initial generation plus one retry with the error message.
 _MAX_SQL_ATTEMPTS = 2
+#: Enough of a rejected reply to diagnose it without flooding a terminal.
+_MAX_LOGGED_REPLY = 400
 
 
 @dataclass(frozen=True)
@@ -152,7 +154,7 @@ class AnswerPipeline:
         """Ask the model for a query; return ``None`` if it declines."""
         prompt = build_sql_prompt(question, passages)
         reply = self._generator.generate(system=self._system, prompt=prompt)
-        return extract_sql(reply)
+        return _parse_sql(reply)
 
     def _validate_with_retry(self, question: str, sql_text: str) -> SafeQuery:
         """Validate, and on rejection feed the error back once."""
@@ -164,7 +166,7 @@ class AnswerPipeline:
 
         repair_prompt = build_repair_prompt(question, sql_text, rejection)
         reply = self._generator.generate(system=self._system, prompt=repair_prompt)
-        repaired = extract_sql(reply)
+        repaired = _parse_sql(reply)
         if repaired is None:
             raise AnswerError("The model declined to write a query on the retry attempt")
 
@@ -190,6 +192,22 @@ class AnswerPipeline:
             passages=passages,
         )
         return self._generator.generate(system=ANSWER_INSTRUCTIONS, prompt=prompt)
+
+
+def _parse_sql(reply: str) -> str | None:
+    """Parse a generator reply, recording what it said when it breaks the contract.
+
+    Without this the only evidence of a malformed reply is that it was malformed,
+    and reproducing it costs another call to the provider.
+    """
+    try:
+        return extract_sql(reply)
+    except AnswerError:
+        collapsed = " ".join(reply.split())
+        if len(collapsed) > _MAX_LOGGED_REPLY:
+            collapsed = f"{collapsed[:_MAX_LOGGED_REPLY]}… ({len(collapsed)} chars in total)"
+        logger.info("the reply broke the output contract: %s", collapsed)
+        raise
 
 
 def _sources_from(passages: Sequence[Passage]) -> tuple[Source, ...]:

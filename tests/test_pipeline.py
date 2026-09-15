@@ -7,6 +7,7 @@ integration tests that create a schema and execute real SQL.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection
 from dataclasses import dataclass
 
@@ -14,7 +15,7 @@ import pytest
 from sqlalchemy import Engine
 
 from rail_rag.rag.exceptions import AnswerError
-from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _sources_from
+from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
 from rail_rag.rag.providers.fake import FakeEmbedder, FakeGenerator
 from rail_rag.rag.router import Route, classify_lexically
@@ -261,3 +262,33 @@ def test_the_no_sql_fallback_keeps_every_source(clean_schema: Engine, kb_schema:
 
     assert _EXTERNAL_BODY in generator.calls[1][1]
     assert {source.doc_id for source in answer.sources} == {_INTERNAL_DOC, _EXTERNAL_DOC}
+
+
+# --- the output contract: a broken reply must leave evidence -------------------
+
+
+@pytest.mark.integration
+def test_a_reply_that_breaks_the_contract_is_logged(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Diagnosing a broken output contract must not cost a second call to the provider."""
+    pipeline, _ = _build(clean_schema, kb_schema, ["I would rather explain the schema instead."])
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"), pytest.raises(AnswerError):
+        pipeline.answer(_DATA_Q)
+    assert "rather explain the schema" in caplog.text
+
+
+def test_a_long_rejected_reply_is_truncated_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """A model that answers with an essay must stay readable in a terminal."""
+    reply = "Not a query. " * 200
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"), pytest.raises(AnswerError):
+        _parse_sql(reply)
+    assert "chars in total" in caplog.text
+    assert len(caplog.text) < len(reply)
+
+
+def test_a_valid_reply_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """The log line is evidence of a failure; on the happy path it would be noise."""
+    with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"):
+        assert _parse_sql("```sql\nSELECT 1\n```") == "SELECT 1"
+    assert caplog.text == ""
