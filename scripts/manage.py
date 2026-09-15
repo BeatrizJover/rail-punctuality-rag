@@ -10,7 +10,7 @@ Usage:
  python scripts/manage.py docs-parse --source ID
  python scripts/manage.py kb-init
  python scripts/manage.py kb-drop --yes
- python scripts/manage.py kb-build [--force]
+ python scripts/manage.py kb-build [--parsed-dir DIR] [--force]
  python scripts/manage.py kb-search --query TEXT
 """
 
@@ -51,7 +51,7 @@ from rail_rag.ingestion.docs.fetcher import (
     sha256_of,
 )
 from rail_rag.ingestion.docs.pdf_reader import parse_document
-from rail_rag.ingestion.docs.sources import load_source
+from rail_rag.ingestion.docs.sources import load_registry, load_source
 from rail_rag.ingestion.fact_source import DateRange, count_fact_rows, is_partitioned
 from rail_rag.ingestion.loader import OnViolation, load_dimensions, load_fact
 from rail_rag.ingestion.manifest import (
@@ -64,6 +64,7 @@ from rail_rag.rag.providers.config import ModelConfig, load_model_config
 from rail_rag.rag.providers.factory import build_embedder, build_generator
 from rail_rag.rag.sql.policy import load_retrieval_config
 from rail_rag.rag.store.builder import build_knowledge_base
+from rail_rag.rag.store.glossary import load_declared_glossaries
 from rail_rag.rag.store.models import KbSchema, build_kb_schema
 from rail_rag.rag.store.repository import kb_stats
 from rail_rag.rag.store.retriever import DEFAULT_TOP_K, Retriever
@@ -256,23 +257,28 @@ def _cmd_kb_drop(confirmed: bool) -> int:
     return EXIT_OK
 
 
-def _cmd_kb_build(corpus_dir: Path, force: bool, profile: str | None) -> int:
-    """Chunk the corpus, upsert it, and embed whatever still needs a vector."""
+def _cmd_kb_build(corpus_dir: Path, parsed_dir: Path, force: bool, profile: str | None) -> int:
+    """Chunk the corpus and the declared documents, upsert both, and embed what needs a vector."""
     settings = get_settings()
     config, kb = _model_setup(profile)
     engine = create_db_engine(settings)
+    document_chunks = load_declared_glossaries(
+        load_registry(DEFAULT_SOURCES_REGISTRY), parsed_dir, max_chars=config.chunking.max_chars
+    )
     report = build_knowledge_base(
         engine,
         kb,
         build_embedder(config, settings.llm_api_key),
         corpus_dir,
+        extra_chunks=document_chunks,
         max_chars=config.chunking.max_chars,
         min_chars=config.chunking.min_chars,
         batch_size=config.embedding.batch_size,
         force=force,
     )
     logger.info(
-        "Corpus: %d inserted, %d updated, %d unchanged, %d deleted",
+        "Synced (%d from documents): %d inserted, %d updated, %d unchanged, %d deleted",
+        len(document_chunks),
         report.sync.inserted,
         report.sync.updated,
         report.sync.unchanged,
@@ -428,6 +434,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR, help="markdown corpus directory"
     )
     kb_build.add_argument(
+        "--parsed-dir",
+        type=Path,
+        default=DEFAULT_PARSED_DIR,
+        help="where docs-parse wrote the canonical JSONL",
+    )
+    kb_build.add_argument(
         "--force", action="store_true", help="re-embed every chunk, ignoring the hashes"
     )
     _add_profile_option(kb_build)
@@ -473,7 +485,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "kb-drop":
             return _cmd_kb_drop(confirmed=bool(args.yes))
         if args.command == "kb-build":
-            return _cmd_kb_build(args.corpus_dir, bool(args.force), args.profile)
+            return _cmd_kb_build(args.corpus_dir, args.parsed_dir, bool(args.force), args.profile)
         if args.command == "kb-search":
             return _cmd_kb_search(args.query, int(args.top_k), args.profile)
         if args.command == "ask":
