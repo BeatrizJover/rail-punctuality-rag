@@ -296,9 +296,11 @@ def _cmd_kb_build(corpus_dir: Path, parsed_dir: Path, force: bool, profile: str 
 
 
 def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
-    """Retrieve passages for one question, to eyeball what the model will see."""
+    """Retrieve passages for one question, unfloored, marking what the pipeline would drop."""
     settings = get_settings()
     config, kb = _model_setup(profile)
+    floor = config.embedding.min_similarity
+    # No floor here: this is the tool that measures where the floor should sit.
     retriever = Retriever(
         create_db_engine(settings),
         kb,
@@ -310,8 +312,15 @@ def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
         logger.warning("No passages retrieved. Has 'kb-build' run?")
         return EXIT_OK
     for rank, passage in enumerate(results, start=1):
+        dropped = floor > 0.0 and passage.similarity < floor
+        below = f"  (below floor {floor:.2f})" if dropped else ""
         logger.info(
-            "%d. [%.3f] %s / %s", rank, passage.similarity, passage.doc_id, passage.heading or "-"
+            "%d. [%.3f] %s / %s%s",
+            rank,
+            passage.similarity,
+            passage.doc_id,
+            passage.heading or "-",
+            below,
         )
         logger.info("   %s", textwrap.shorten(passage.content, _PREVIEW_CHARS))
     return EXIT_OK
@@ -332,7 +341,15 @@ def _cmd_ask(
     generator = build_generator(config, settings.llm_api_key)
     embedder = build_embedder(config, settings.llm_api_key)
 
-    pipe = AnswerPipeline(engine, generator, embedder, kb, retrieval.sql, external_ids=external_ids)
+    pipe = AnswerPipeline(
+        engine,
+        generator,
+        embedder,
+        kb,
+        retrieval.sql,
+        external_ids=external_ids,
+        min_similarity=config.embedding.min_similarity,
+    )
     answer = pipe.answer(question)
 
     logger.info("[%s]", answer.route.value)
@@ -445,7 +462,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_profile_option(kb_build)
 
-    kb_search = sub.add_parser("kb-search", help="retrieve passages for one question")
+    kb_search = sub.add_parser(
+        "kb-search",
+        help="retrieve passages for one question",
+        description="Rank passages without the similarity floor; those the pipeline would drop"
+        " are marked.",
+    )
     kb_search.add_argument("--query", required=True, help="the question to embed and search with")
     kb_search.add_argument(
         "--top-k", type=int, default=DEFAULT_TOP_K, help="how many passages to return"
