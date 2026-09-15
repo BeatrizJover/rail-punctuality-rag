@@ -13,7 +13,7 @@ worker thread, so colouring this coroutine would buy nothing.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import Engine
@@ -37,7 +37,7 @@ from rail_rag.rag.sql.executor import QueryResult, execute_safe_query
 from rail_rag.rag.sql.guard import SafeQuery, validate_sql
 from rail_rag.rag.sql.policy import SqlPolicy
 from rail_rag.rag.store.models import KbSchema
-from rail_rag.rag.store.retriever import Retriever
+from rail_rag.rag.store.retriever import Retriever, ScopedPassages
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class AnswerPipeline:
         policy: SqlPolicy,
         *,
         top_k: int = 4,
+        external_ids: Collection[str] = (),
     ) -> None:
         self._engine = engine
         self._generator = generator
@@ -84,7 +85,7 @@ class AnswerPipeline:
         profile = load_profile(engine)
         self._profile = profile
         self._system = build_sql_system(render_context(policy, profile))
-        self._retriever = Retriever(engine, kb, embedder, top_k=top_k)
+        self._retriever = Retriever(engine, kb, embedder, top_k=top_k, external_ids=external_ids)
 
     @property
     def profile(self) -> DataProfile:
@@ -101,29 +102,25 @@ class AnswerPipeline:
         if not question.strip():
             raise AnswerError("The question is empty")
 
-        passages = self._retriever.retrieve(question)
-        sources = _sources_from(passages)
+        passages = self._retriever.retrieve_scoped(question)
         route = classify(question, self._generator)
 
         if route is Route.CONCEPTUAL:
-            return self._answer_conceptual(question, passages, sources)
+            return self._answer_conceptual(question, passages.all_sources)
 
-        return self._answer_data(question, passages, sources)
+        return self._answer_data(question, passages)
 
-    def _answer_data(
-        self,
-        question: str,
-        passages: Sequence[Passage],
-        sources: tuple[Source, ...],
-    ) -> Answer:
+    def _answer_data(self, question: str, passages: ScopedPassages) -> Answer:
         """Generate SQL, validate, execute, narrate — or fall back."""
-        sql_text = self._generate_sql(question, passages)
+        internal = passages.internal_only
+        sql_text = self._generate_sql(question, internal)
         if sql_text is None:
             logger.info("generator declined with %s; falling back to conceptual", NO_SQL)
-            return self._answer_conceptual(question, passages, sources)
+            return self._answer_conceptual(question, passages.all_sources)
 
         safe = self._validate_with_retry(question, sql_text)
         result = execute_safe_query(self._engine, safe, self._policy)
+        sources = _sources_from(internal)
 
         if result.is_empty and not self._profile.has_data:
             return Answer(
@@ -134,7 +131,7 @@ class AnswerPipeline:
                 sources=sources,
             )
 
-        narration = self._narrate(question, result, passages)
+        narration = self._narrate(question, result, internal)
         return Answer(
             text=narration,
             route=Route.DATA,
@@ -143,18 +140,13 @@ class AnswerPipeline:
             sources=sources,
         )
 
-    def _answer_conceptual(
-        self,
-        question: str,
-        passages: Sequence[Passage],
-        sources: tuple[Source, ...],
-    ) -> Answer:
+    def _answer_conceptual(self, question: str, passages: Sequence[Passage]) -> Answer:
         """Answer from documentation only, no SQL."""
         prompt = build_conceptual_prompt(question, passages)
         from rail_rag.rag.prompts import CONCEPTUAL_INSTRUCTIONS
 
         text = self._generator.generate(system=CONCEPTUAL_INSTRUCTIONS, prompt=prompt)
-        return Answer(text=text, route=Route.CONCEPTUAL, sources=sources)
+        return Answer(text=text, route=Route.CONCEPTUAL, sources=_sources_from(passages))
 
     def _generate_sql(self, question: str, passages: Sequence[Passage]) -> str | None:
         """Ask the model for a query; return ``None`` if it declines."""
