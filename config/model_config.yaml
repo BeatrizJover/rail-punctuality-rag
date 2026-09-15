@@ -35,6 +35,9 @@ profiles:
       dimension: 768
       batch_size: 32
       timeout_s: 60
+      # Measured in stage 5D.0: off-domain ceiling 0.614, lowest internal hit kept 0.627.
+      # Only valid for this model; re-measure with kb-search before changing it.
+      min_similarity: 0.62
     chunking:
       max_chars: 1500
       min_chars: 120

@@ -83,6 +83,7 @@ def _build(
     responses: list[str],
     *,
     external_ids: Collection[str] = (),
+    min_similarity: float = 0.0,
 ) -> tuple[AnswerPipeline, FakeGenerator]:
     """Construct a pipeline against a live schema with a scripted generator."""
     generator = FakeGenerator(responses)
@@ -94,6 +95,7 @@ def _build(
         kb,
         SqlPolicy(allowed_tables=_ALLOWED),
         external_ids=external_ids,
+        min_similarity=min_similarity,
     )
     return pipeline, generator
 
@@ -262,6 +264,45 @@ def test_the_no_sql_fallback_keeps_every_source(clean_schema: Engine, kb_schema:
 
     assert _EXTERNAL_BODY in generator.calls[1][1]
     assert {source.doc_id for source in answer.sources} == {_INTERNAL_DOC, _EXTERNAL_DOC}
+
+
+# --- similarity floor: weak passages never reach the model -------------------
+
+#: Only an exact match clears it; the fake scores unrelated text anywhere in [-1, 1].
+_HIGH_FLOOR = 0.99
+
+
+@pytest.mark.integration
+def test_the_floor_reaches_the_data_path(clean_schema: Engine, kb_schema: KbSchema) -> None:
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, generator = _build(
+        clean_schema,
+        kb_schema,
+        ["```sql\nSELECT 1 AS n\n```", "The answer is 1."],
+        min_similarity=_HIGH_FLOOR,
+    )
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.route is Route.DATA
+    assert _INTERNAL_BODY not in generator.calls[0][1]
+    assert "no relevant documentation" in generator.calls[0][1]
+    assert answer.sources == ()
+
+
+@pytest.mark.integration
+def test_the_floor_reaches_the_conceptual_path(clean_schema: Engine, kb_schema: KbSchema) -> None:
+    """An unsupported question must be answered as unsupported, not from noise."""
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, generator = _build(
+        clean_schema, kb_schema, ["Not in the documentation."], min_similarity=_HIGH_FLOOR
+    )
+    answer = pipeline.answer(_CONCEPTUAL_Q)
+
+    assert answer.route is Route.CONCEPTUAL
+    assert _INTERNAL_BODY not in generator.calls[0][1]
+    assert _EXTERNAL_BODY not in generator.calls[0][1]
+    assert "no relevant documentation" in generator.calls[0][1]
+    assert answer.sources == ()
 
 
 # --- the output contract: a broken reply must leave evidence -------------------

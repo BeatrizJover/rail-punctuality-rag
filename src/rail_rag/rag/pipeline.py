@@ -79,6 +79,7 @@ class AnswerPipeline:
         *,
         top_k: int = 4,
         external_ids: Collection[str] = (),
+        min_similarity: float = 0.0,
     ) -> None:
         self._engine = engine
         self._generator = generator
@@ -87,7 +88,14 @@ class AnswerPipeline:
         profile = load_profile(engine)
         self._profile = profile
         self._system = build_sql_system(render_context(policy, profile))
-        self._retriever = Retriever(engine, kb, embedder, top_k=top_k, external_ids=external_ids)
+        self._retriever = Retriever(
+            engine,
+            kb,
+            embedder,
+            top_k=top_k,
+            external_ids=external_ids,
+            min_similarity=min_similarity,
+        )
 
     @property
     def profile(self) -> DataProfile:

@@ -82,13 +82,16 @@ def build_state(
         kb,
         policy,
         external_ids=external_ids,
+        min_similarity=config.embedding.min_similarity,
     )
     logger.info(
-        "Pipeline ready (provider=%s, generation=%s, embedding=%s, external sources=%d)",
+        "Pipeline ready (provider=%s, generation=%s, embedding=%s, external sources=%d,"
+        " similarity floor=%.2f)",
         config.provider,
         config.generation.model,
         config.embedding.model,
         len(external_ids),
+        config.embedding.min_similarity,
     )
     return AppState(
         engine=engine,
