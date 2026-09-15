@@ -8,6 +8,7 @@ upsert must be testable without an API key.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from sqlalchemy import Engine
 
 from rail_rag.rag.exceptions import RagError
 from rail_rag.rag.providers.base import Embedder
-from rail_rag.rag.store.chunking import DEFAULT_MAX_CHARS, DEFAULT_MIN_CHARS, load_corpus
+from rail_rag.rag.store.chunking import DEFAULT_MAX_CHARS, DEFAULT_MIN_CHARS, Chunk, load_corpus
 from rail_rag.rag.store.models import KbSchema
 from rail_rag.rag.store.repository import (
     SyncReport,
@@ -43,15 +44,17 @@ def build_knowledge_base(
     embedder: Embedder,
     corpus_dir: Path,
     *,
+    extra_chunks: Sequence[Chunk] = (),
     max_chars: int = DEFAULT_MAX_CHARS,
     min_chars: int = DEFAULT_MIN_CHARS,
     batch_size: int = 32,
     force: bool = False,
 ) -> BuildReport:
-    """Chunk the corpus, upsert it, and embed whatever still needs a vector.
+    """Chunk the corpus, upsert it with ``extra_chunks``, and embed what needs a vector.
 
     Raises:
-        RagError: if the corpus is unusable or the embedder does not match the schema.
+        RagError: if the corpus is unusable, if the embedder does not match the
+            schema, or if two chunks claim the same position.
         DatabaseError: if the knowledge base is absent or cannot be written.
         ProviderError: if the embedding provider fails.
     """
@@ -67,7 +70,9 @@ def build_knowledge_base(
         )
 
     chunks = load_corpus(corpus_dir, max_chars=max_chars, min_chars=min_chars)
-    report = sync_chunks(engine, kb, chunks)
+    # One sync, not two: sync_chunks deletes every position it is not given, so a
+    # second call would wipe whatever the first one wrote.
+    report = sync_chunks(engine, kb, [*chunks, *extra_chunks])
 
     pending = pending_chunks(engine, kb, model_name=embedder.model_name, force=force)
     if not pending:
