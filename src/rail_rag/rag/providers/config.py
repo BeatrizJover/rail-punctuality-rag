@@ -43,6 +43,9 @@ class EmbeddingConfig(BaseModel):
     dimension: int = Field(gt=0)
     batch_size: int = Field(default=32, gt=0)
     timeout_s: float = Field(default=60.0, gt=0)
+    #: Cosine similarity below which a passage is dropped. Measured per model, so it
+    #: lives here; zero keeps every passage.
+    min_similarity: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class ChunkingConfig(BaseModel):

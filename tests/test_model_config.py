@@ -61,10 +61,18 @@ def test_repo_configuration_keeps_an_offline_profile() -> None:
     assert profiles.select("fake").provider == "fake"
 
 
+def test_repo_configuration_floors_only_the_measured_profile() -> None:
+    """Hashed fake vectors score near zero, so a floor there would cut every passage."""
+    profiles = load_profiles(REPO_CONFIG)
+    assert profiles.select("gemini").embedding.min_similarity > 0.0
+    assert profiles.select("fake").embedding.min_similarity == 0.0
+
+
 def test_defaults_are_applied(tmp_path: Path) -> None:
     config = load_model_config(_write(tmp_path, _MINIMAL))
     assert config.generation.temperature == 0.0
     assert config.embedding.batch_size == 32
+    assert config.embedding.min_similarity == 0.0
     assert config.max_retries == 3
     assert config.chunking.max_chars == 1500
 
@@ -125,6 +133,13 @@ def test_out_of_range_temperature_is_rejected(tmp_path: Path) -> None:
 
 def test_non_positive_dimension_is_rejected(tmp_path: Path) -> None:
     body = _MINIMAL.replace("dimension: 8", "dimension: 0")
+    with pytest.raises(ConfigError, match="Invalid model configuration"):
+        load_model_config(_write(tmp_path, body))
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1"])
+def test_out_of_range_similarity_floor_is_rejected(tmp_path: Path, value: str) -> None:
+    body = _MINIMAL.replace("dimension: 8", f"dimension: 8\n      min_similarity: {value}")
     with pytest.raises(ConfigError, match="Invalid model configuration"):
         load_model_config(_write(tmp_path, body))
 
