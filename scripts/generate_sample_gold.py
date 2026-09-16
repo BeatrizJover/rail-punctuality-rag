@@ -13,8 +13,12 @@ It deliberately reproduces the shapes the contracts have to tolerate:
     case;
   * a null ``ptcar_no`` on some stations - the daily-feed-only rows.
 
-Determinism: a fixed seed, so the output is byte-stable across runs and safe to use
-as a committed fixture. Usage::
+It also writes ``_manifest/coverage.json``, as the lakehouse export does, so the
+loader's coverage gate accepts the sample. The generator refuses to write into a
+partitioned export, where its files would shadow or contradict the real data.
+
+Determinism: a fixed seed and a fixed ``exported_at``, so the output is byte-stable
+across runs and safe to use as a committed fixture. Usage::
 
     python scripts/generate_sample_gold.py --out-dir data/sample_gold --stations 20 --days 3
 """
@@ -32,6 +36,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from rail_rag.core.logging import configure_logging
+from rail_rag.ingestion.fact_source import FACT_DIRNAME
+from rail_rag.ingestion.manifest import (
+    MANIFEST_PATH,
+    CoverageManifest,
+    FactCoverage,
+    RequestedRange,
+)
 
 logger = logging.getLogger("rail_rag.generate_sample_gold")
 
@@ -217,8 +228,33 @@ def _build_fact(
     )
 
 
+def _build_manifest(tables: dict[str, pa.Table], service_days: list[dt.date]) -> CoverageManifest:
+    """Coverage manifest derived from the tables actually written."""
+    fact = tables["fact_stop_event"]
+    dates: list[dt.date] = fact.column("date_key").to_pylist()
+    rows_per_year: dict[str, int] = {}
+    for day in dates:
+        rows_per_year[str(day.year)] = rows_per_year.get(str(day.year), 0) + 1
+    return CoverageManifest(
+        exported_at=dt.datetime.combine(service_days[-1], dt.time(), tzinfo=dt.UTC),
+        requested_range=RequestedRange(start=service_days[0], end=service_days[-1]),
+        fact_stop_event=FactCoverage(
+            min_date_key=min(dates),
+            max_date_key=max(dates),
+            total_rows=fact.num_rows,
+            rows_per_year=dict(sorted(rows_per_year.items())),
+        ),
+        dimensions={
+            name: table.num_rows for name, table in tables.items() if name.startswith("dim_")
+        },
+        layout={name: f"{name}.parquet" for name in tables},
+    )
+
+
 def generate(out_dir: Path, *, stations: int, days: int) -> dict[str, int]:
-    """Write the four Gold tables to ``out_dir`` as Parquet. Returns row counts."""
+    """Write the four Gold tables and their coverage manifest to ``out_dir``. Returns row counts."""
+    if (out_dir / FACT_DIRNAME).is_dir():
+        raise FileExistsError(f"{out_dir} holds a partitioned export; choose another --out-dir")
     rng = random.Random(_SEED)
     end = dt.date(2026, 8, 23)
     service_days = [end - dt.timedelta(days=offset) for offset in reversed(range(days))]
@@ -243,6 +279,13 @@ def generate(out_dir: Path, *, stations: int, days: int) -> dict[str, int]:
     for name, table in tables.items():
         pq.write_table(table, out_dir / f"{name}.parquet")
         logger.info("wrote %s (%d rows)", name, table.num_rows)
+
+    manifest_file = out_dir / MANIFEST_PATH
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+    manifest_file.write_text(
+        _build_manifest(tables, service_days).model_dump_json(indent=2) + "\n", encoding="utf-8"
+    )
+    logger.info("wrote %s", manifest_file)
     return {name: table.num_rows for name, table in tables.items()}
 
 
@@ -259,7 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     """Run the generator from the command line."""
     args = build_parser().parse_args(argv)
     configure_logging("INFO")
-    counts = generate(args.out_dir, stations=args.stations, days=args.days)
+    try:
+        counts = generate(args.out_dir, stations=args.stations, days=args.days)
+    except FileExistsError as exc:
+        logger.error("%s", exc)
+        return 1
     logger.info("done: %s", counts)
     return 0
 

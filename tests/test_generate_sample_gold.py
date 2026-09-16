@@ -7,15 +7,30 @@ deliberately-included edge shapes are checked too.
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
+from sqlalchemy import Engine
 
+from rail_rag.ingestion.derivations import (
+    assert_referential_integrity,
+    derive_station_activity,
+    optimize_fact_for_reads,
+)
 from rail_rag.ingestion.gold_source import (
     read_dim_relation,
     read_dim_station,
     read_fact_stop_event,
+)
+from rail_rag.ingestion.loader import load_dimensions, load_fact
+from rail_rag.ingestion.manifest import (
+    MANIFEST_PATH,
+    assert_dimension_counts,
+    assert_fact_coverage,
+    read_manifest,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -50,6 +65,7 @@ def test_generation_is_deterministic(tmp_path: Path) -> None:
     generate(b, stations=8, days=2)
     for name in ("dim_date", "dim_station", "dim_relation", "fact_stop_event"):
         assert (a / f"{name}.parquet").read_bytes() == (b / f"{name}.parquet").read_bytes()
+    assert (a / MANIFEST_PATH).read_bytes() == (b / MANIFEST_PATH).read_bytes()
 
 
 def test_generated_data_includes_null_ptcar_no(tmp_path: Path) -> None:
@@ -75,3 +91,49 @@ def test_generated_files_are_valid_parquet(tmp_path: Path) -> None:
     counts = generate(tmp_path, stations=6, days=2)
     for name, expected in counts.items():
         assert pq.read_table(tmp_path / f"{name}.parquet").num_rows == expected
+
+
+def test_generated_manifest_passes_the_coverage_gate(tmp_path: Path) -> None:
+    """The manifest must validate and declare exactly what was written."""
+    counts = generate(tmp_path, stations=6, days=3)
+    manifest = read_manifest(tmp_path)
+    fact = manifest.fact_stop_event
+
+    assert fact.total_rows == counts["fact_stop_event"]
+    assert (fact.min_date_key, fact.max_date_key) == (dt.date(2026, 8, 21), dt.date(2026, 8, 23))
+    assert manifest.dimensions == {
+        "dim_date": counts["dim_date"],
+        "dim_station": counts["dim_station"],
+        "dim_relation": counts["dim_relation"],
+    }
+
+
+def test_generation_refuses_a_partitioned_export(tmp_path: Path) -> None:
+    """Writing into a real export would shadow its manifest and mix layouts."""
+    (tmp_path / "fact_stop_event").mkdir()
+    with pytest.raises(FileExistsError, match="partitioned export"):
+        generate(tmp_path, stations=2, days=1)
+    assert not (tmp_path / MANIFEST_PATH).exists()
+
+
+@pytest.mark.integration
+def test_generated_export_completes_the_quickstart_load(
+    clean_schema: Engine, tmp_path: Path
+) -> None:
+    """load-dims, load-fact and finalize, with their manifest gates, accept the sample."""
+    generate(tmp_path, stations=10, days=2)
+    manifest = read_manifest(tmp_path)
+
+    assert_dimension_counts(manifest, load_dimensions(clean_schema, tmp_path))
+    counts = load_fact(clean_schema, tmp_path)
+    assert_fact_coverage(
+        manifest,
+        loaded_rows=counts.rows_inserted,
+        on_disk_rows=counts.rows_read,
+        range_start=None,
+        range_end=None,
+    )
+
+    assert derive_station_activity(clean_schema) > 0
+    assert_referential_integrity(clean_schema)
+    optimize_fact_for_reads(clean_schema)

@@ -33,7 +33,9 @@ gold_export/
 # IDEs
 .vscode/
 
-
 # Third-party source documents (see config/sources.yaml)
 data/docs/raw/
 data/docs/parsed/
+
+# Synthetic Gold sample (scripts/generate_sample_gold.py)
+data/sample_gold/
