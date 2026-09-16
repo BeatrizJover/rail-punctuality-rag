@@ -1,17 +1,20 @@
 """Administrative command line entry point.
-Usage:
+
+Usage (global ``-v`` goes before the subcommand):
  python scripts/manage.py db-ping
  python scripts/manage.py db-init
- python scripts/manage.py db-drop --yes
+ python scripts/manage.py db-drop --yes [--include-ops]
  python scripts/manage.py load-dims --source-dir DIR
  python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
+     [--on-violation {fail,skip}]
  python scripts/manage.py finalize
- python scripts/manage.py docs-fetch --source ID [--bootstrap]
- python scripts/manage.py docs-parse --source ID
- python scripts/manage.py kb-init
- python scripts/manage.py kb-drop --yes
- python scripts/manage.py kb-build [--parsed-dir DIR] [--force]
- python scripts/manage.py kb-search --query TEXT
+ python scripts/manage.py docs-fetch --source ID [--dest-dir DIR] [--bootstrap]
+ python scripts/manage.py docs-parse --source ID [--dest-dir DIR]
+ python scripts/manage.py kb-init [--profile P]
+ python scripts/manage.py kb-drop --yes [--profile P]
+ python scripts/manage.py kb-build [--corpus-dir DIR] [--parsed-dir DIR] [--force] [--profile P]
+ python scripts/manage.py kb-search --query TEXT [--top-k N] [--profile P]
+ python scripts/manage.py ask --question TEXT [--show-sql] [--profile P]
 """
 
 import argparse

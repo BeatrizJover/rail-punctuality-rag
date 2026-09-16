@@ -13,7 +13,6 @@ from pathlib import Path
 import pdfplumber
 import pytest
 from pydantic import HttpUrl
-from tests.conftest import FakePage, write_glossary_pdf
 
 from rail_rag.ingestion.docs.exceptions import ParseError
 from rail_rag.ingestion.docs.pdf_reader import (
@@ -29,6 +28,7 @@ from rail_rag.ingestion.docs.pdf_reader import (
     running_lines,
 )
 from rail_rag.ingestion.docs.sources import DocumentSource, ParseSpec, SectionSpec
+from tests.conftest import FakePage, write_glossary_pdf
 
 _EDGES = (71.0, 241.0, 610.0, 780.0)
 _TWO_EDGES = (71.0, 188.0, 542.0)

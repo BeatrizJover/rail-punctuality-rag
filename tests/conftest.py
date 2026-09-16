@@ -22,6 +22,7 @@ from rail_rag.rag.store.models import KbSchema, build_kb_schema
 from rail_rag.rag.store.schema import create_kb_schema, drop_kb_schema
 
 _TEST_DSN_VAR = "TEST_DATABASE_URL"
+_REQUIRE_DB_VAR = "TEST_DATABASE_REQUIRED"
 _TEST_DB_SUFFIX = "_test"
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _UNREACHABLE_SIGNALS = (
@@ -46,6 +47,11 @@ def _default_test_dsn() -> str:
     return f"postgresql+psycopg://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{name}"
 
 
+def database_required() -> bool:
+    """True when an unreachable database must fail the run instead of skipping it."""
+    return os.environ.get(_REQUIRE_DB_VAR, "").strip().lower() in {"1", "true", "yes"}
+
+
 @pytest.fixture(autouse=True)
 def isolated_settings_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run each test in a clean directory with no ``.env`` and no app vars."""
@@ -68,8 +74,8 @@ def default_test_dsn() -> str:
 def postgres_engine() -> Iterator[Engine]:
     """Yield an engine against a live PostgreSQL, or skip the test.
 
-    Skipping rather than failing keeps ``pytest`` green on a clean checkout and
-    in CI, where no database is provisioned.
+    Skipping keeps ``pytest`` usable on a clean checkout. CI sets
+    ``TEST_DATABASE_REQUIRED`` so a missing database fails instead of passing green.
     """
     dsn = os.environ.get(_TEST_DSN_VAR) or _default_test_dsn()
     engine = create_engine(dsn, pool_pre_ping=True, future=True)
@@ -80,7 +86,10 @@ def postgres_engine() -> Iterator[Engine]:
         engine.dispose()
         if not any(signal in str(exc).lower() for signal in _UNREACHABLE_SIGNALS):
             raise
-        pytest.skip(f"No PostgreSQL reachable; set {_TEST_DSN_VAR} or start docker compose")
+        message = f"No PostgreSQL reachable; set {_TEST_DSN_VAR} or start docker compose"
+        if database_required():
+            pytest.fail(message)
+        pytest.skip(message)
     try:
         yield engine
     finally:
