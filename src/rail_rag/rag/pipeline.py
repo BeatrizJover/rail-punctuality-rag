@@ -118,6 +118,10 @@ class AnswerPipeline:
     def profile(self) -> DataProfile:
         return self._profile
 
+    @property
+    def system_prompt(self) -> str:
+        return self._system
+
     def answer(self, question: str, *, narrate: bool = True) -> Answer:
         """Return a complete answer, choosing the path automatically.
 
