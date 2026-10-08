@@ -66,11 +66,14 @@ class Trace:
     total_ms: float = 0.0
     spans: list[Span] = field(default_factory=list)
 
-    def to_json(self) -> str:
-        """Serialise to a single line, so a log file is one record per trace."""
+    def to_dict(self) -> dict[str, Any]:
         record = asdict(self)
         record["started_at"] = self.started_at.isoformat()
-        return json.dumps(record, separators=(",", ":"), default=str)
+        return record
+
+    def to_json(self) -> str:
+        """Serialise to a single line, so a log file is one record per trace."""
+        return json.dumps(self.to_dict(), separators=(",", ":"), default=str)
 
 
 class _Active:
@@ -102,6 +105,18 @@ class _Active:
 
 
 _active: ContextVar[_Active | None] = ContextVar("rail_rag_active_trace", default=None)
+_sinks: ContextVar[tuple[list[Trace], ...]] = ContextVar("rail_rag_trace_sinks", default=())
+
+
+@contextmanager
+def capture_traces() -> Iterator[list[Trace]]:
+    """Collect every trace finished in this context, including those of requests that raised."""
+    collected: list[Trace] = []
+    token = _sinks.set((*_sinks.get(), collected))
+    try:
+        yield collected
+    finally:
+        _sinks.reset(token)
 
 
 @contextmanager
@@ -134,6 +149,8 @@ def start_trace(
         trace.total_ms = _elapsed_ms(clock, started)
         _active.reset(token)
         _emit(trace)
+        for sink in _sinks.get():
+            sink.append(trace)
 
 
 @contextmanager

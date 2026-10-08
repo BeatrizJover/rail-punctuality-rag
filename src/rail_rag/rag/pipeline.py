@@ -118,7 +118,7 @@ class AnswerPipeline:
     def profile(self) -> DataProfile:
         return self._profile
 
-    def answer(self, question: str) -> Answer:
+    def answer(self, question: str, *, narrate: bool = True) -> Answer:
         """Return a complete answer, choosing the path automatically.
 
         Never raises on a recoverable failure: a misrouted question falls back
@@ -127,10 +127,10 @@ class AnswerPipeline:
         down) surfaces as :class:`AnswerError`.
         """
         with start_trace("answer", question=question) as active:
-            answer = self._answer(question)
+            answer = self._answer(question, narrate)
         return replace(answer, trace=active)
 
-    def _answer(self, question: str) -> Answer:
+    def _answer(self, question: str, narrate: bool) -> Answer:
         if not question.strip():
             raise AnswerError("The question is empty")
 
@@ -141,11 +141,11 @@ class AnswerPipeline:
         annotate(route=route.value)
 
         if route is Route.CONCEPTUAL:
-            return self._answer_conceptual(question, passages.all_sources)
+            return self._answer_conceptual(question, passages.all_sources, narrate)
 
-        return self._answer_data(question, passages)
+        return self._answer_data(question, passages, narrate)
 
-    def _answer_data(self, question: str, passages: ScopedPassages) -> Answer:
+    def _answer_data(self, question: str, passages: ScopedPassages, narrate: bool) -> Answer:
         """Generate SQL, validate, execute, narrate — or fall back."""
         internal = passages.internal_only
         with span("sql_generation"):
@@ -153,7 +153,7 @@ class AnswerPipeline:
         if sql_text is None:
             logger.info("generator declined with %s; falling back to conceptual", NO_SQL)
             annotate(route=Route.CONCEPTUAL.value)
-            return self._answer_conceptual(question, passages.all_sources)
+            return self._answer_conceptual(question, passages.all_sources, narrate)
 
         safe = self._validate_with_retry(question, sql_text)
         with span("sql_checks"):
@@ -164,6 +164,9 @@ class AnswerPipeline:
             if result.elapsed_ms >= _NEAR_TIMEOUT_RATIO * self._policy.statement_timeout_ms:
                 annotate(near_timeout=True)
         sources = _sources_from(internal)
+
+        if not narrate:
+            return Answer(text="", route=Route.DATA, sql=safe.sql, result=result, sources=sources)
 
         if result.is_empty and not self._profile.has_data:
             return Answer(
@@ -183,8 +186,12 @@ class AnswerPipeline:
             sources=sources,
         )
 
-    def _answer_conceptual(self, question: str, passages: Sequence[Passage]) -> Answer:
+    def _answer_conceptual(
+        self, question: str, passages: Sequence[Passage], narrate: bool
+    ) -> Answer:
         """Answer from documentation only, no SQL."""
+        if not narrate:
+            return Answer(text="", route=Route.CONCEPTUAL, sources=_sources_from(passages))
         prompt = build_conceptual_prompt(question, passages)
         from rail_rag.rag.prompts import CONCEPTUAL_INSTRUCTIONS
 

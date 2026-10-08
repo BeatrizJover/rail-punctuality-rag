@@ -655,3 +655,73 @@ def test_the_startup_trace_records_the_partition_count(
     (record,) = _emitted(caplog)
     (partitions,) = [s for s in record["spans"] if s["name"] == "partitions"]
     assert partitions["attributes"] == {"count": 36}
+
+
+# --- narrate=False: the runner only needs what the pipeline executed -----------------
+
+
+@pytest.mark.integration
+def test_without_narration_the_data_path_stops_after_execution(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, generator = _build(clean_schema, kb_schema, [_GOOD_SQL, "never requested"])
+    answer = pipeline.answer(_DATA_Q, narrate=False)
+
+    assert answer.text == ""
+    assert answer.route is Route.DATA
+    assert answer.sql is not None
+    assert answer.result is not None
+    assert len(generator.calls) == 1
+    assert "narration" not in _span_names(answer)
+    assert _span_names(answer)[-1] == "execute"
+
+
+@pytest.mark.integration
+def test_without_narration_the_conceptual_path_makes_no_generation_call(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    _populate_kb(clean_schema, kb_schema)
+    pipeline, generator = _build(clean_schema, kb_schema, ["never requested"])
+    answer = pipeline.answer(_CONCEPTUAL_Q, narrate=False)
+
+    assert answer.text == ""
+    assert answer.route is Route.CONCEPTUAL
+    assert answer.sources != ()
+    assert generator.calls == []
+    assert "conceptual_answer" not in _span_names(answer)
+
+
+@pytest.mark.integration
+def test_without_narration_a_declined_query_falls_back_without_a_second_call(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, generator = _build(clean_schema, kb_schema, [NO_SQL, "never requested"])
+    answer = pipeline.answer(_SUPERLATIVE_Q, narrate=False)
+
+    assert answer.route is Route.CONCEPTUAL
+    assert answer.text == ""
+    assert len(generator.calls) == 1
+    assert _span_names(answer)[-1] == "sql_generation"
+
+
+@pytest.mark.integration
+def test_without_narration_an_empty_table_still_reports_its_result(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(
+        clean_schema, kb_schema, ["```sql\nSELECT * FROM gold.fact_stop_event\n```"]
+    )
+    answer = pipeline.answer(_DATA_Q, narrate=False)
+
+    assert answer.result is not None
+    assert answer.result.is_empty
+    assert answer.text == ""
+
+
+@pytest.mark.integration
+def test_narration_stays_on_by_default(clean_schema: Engine, kb_schema: KbSchema) -> None:
+    pipeline, generator = _build(clean_schema, kb_schema, [_GOOD_SQL, "The answer is 1."])
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.text == "The answer is 1."
+    assert len(generator.calls) == 2
