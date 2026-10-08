@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
+from rail_rag.observability import record_provider_call
 from rail_rag.rag.exceptions import ProviderError
 from rail_rag.rag.providers.config import ModelConfig
 
@@ -49,19 +50,44 @@ class _Retrying:
         self._max_retries = max_retries
         self._backoff_s = backoff_s
 
-    def run(self, what: str, call: Any) -> Any:
+    def run(
+        self,
+        what: str,
+        call: Any,
+        *,
+        kind: Literal["generation", "embedding"],
+        model: str,
+    ) -> Any:
+        started = time.perf_counter()
+        attempts = 0
+        response: Any = None
         last: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            try:
-                return call()
-            except Exception as exc:
-                if not _retryable(exc) or attempt == self._max_retries:
-                    raise ProviderError(f"Gemini {what} failed: {type(exc).__name__}") from exc
-                last = exc
-                delay = self._backoff_s * (2**attempt)
-                logger.warning("Gemini %s throttled, retrying in %.1fs", what, delay)
-                time.sleep(delay)
-        raise ProviderError(f"Gemini {what} failed: {type(last).__name__}")
+        try:
+            for attempt in range(self._max_retries + 1):
+                attempts += 1
+                try:
+                    response = call()
+                    return response
+                except Exception as exc:
+                    if not _retryable(exc) or attempt == self._max_retries:
+                        raise ProviderError(f"Gemini {what} failed: {type(exc).__name__}") from exc
+                    last = exc
+                    delay = self._backoff_s * (2**attempt)
+                    logger.warning("Gemini %s throttled, retrying in %.1fs", what, delay)
+                    time.sleep(delay)
+            raise ProviderError(f"Gemini {what} failed: {type(last).__name__}")
+        finally:
+            usage = getattr(response, "usage_metadata", None)
+            record_provider_call(
+                kind=kind,
+                model=model,
+                latency_ms=(time.perf_counter() - started) * _MS_PER_S,
+                attempts=attempts,
+                prompt_tokens=getattr(usage, "prompt_token_count", None),
+                output_tokens=getattr(usage, "candidates_token_count", None),
+                thought_tokens=getattr(usage, "thoughts_token_count", None),
+                total_tokens=getattr(usage, "total_token_count", None),
+            )
 
 
 class GeminiGenerator:
@@ -90,6 +116,8 @@ class GeminiGenerator:
             lambda: self._client.models.generate_content(
                 model=self._config.model, contents=prompt, config=request
             ),
+            kind="generation",
+            model=self._config.model,
         )
         text = getattr(response, "text", None)
         if not text:
@@ -147,6 +175,8 @@ class GeminiEmbedder:
                 lambda text=text, request=request: self._client.models.embed_content(
                     model=self._config.model, contents=text, config=request
                 ),
+                kind="embedding",
+                model=self._config.model,
             )
             embeddings = getattr(response, "embeddings", None) or []
             if len(embeddings) != 1:

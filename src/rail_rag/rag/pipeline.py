@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
 
+from rail_rag.observability import Trace, annotate, span, start_trace
 from rail_rag.rag.context import render_context
 from rail_rag.rag.context.profile import DataProfile, load_profile
 from rail_rag.rag.exceptions import AnswerError, UnsafeQueryError
@@ -45,6 +46,8 @@ logger = logging.getLogger(__name__)
 _MAX_SQL_ATTEMPTS = 2
 #: Enough of a rejected reply to diagnose it without flooding a terminal.
 _MAX_LOGGED_REPLY = 400
+#: Share of the statement timeout above which a query is flagged as close to it.
+_NEAR_TIMEOUT_RATIO = 0.8
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class Answer:
     sql: str | None = None
     result: QueryResult | None = None
     sources: tuple[Source, ...] = field(default_factory=tuple)
+    trace: Trace | None = field(default=None, compare=False, repr=False)
 
 
 class AnswerPipeline:
@@ -85,17 +89,21 @@ class AnswerPipeline:
         self._generator = generator
         self._policy = policy
 
-        profile = load_profile(engine)
-        self._profile = profile
-        self._system = build_sql_system(render_context(policy, profile))
-        self._retriever = Retriever(
-            engine,
-            kb,
-            embedder,
-            top_k=top_k,
-            external_ids=external_ids,
-            min_similarity=min_similarity,
-        )
+        with start_trace("startup"):
+            with span("profile"):
+                profile = load_profile(engine)
+            self._profile = profile
+            with span("context"):
+                self._system = build_sql_system(render_context(policy, profile))
+            with span("retriever"):
+                self._retriever = Retriever(
+                    engine,
+                    kb,
+                    embedder,
+                    top_k=top_k,
+                    external_ids=external_ids,
+                    min_similarity=min_similarity,
+                )
 
     @property
     def profile(self) -> DataProfile:
@@ -109,11 +117,19 @@ class AnswerPipeline:
         unrecoverable failure (empty model reply, two guard rejections, database
         down) surfaces as :class:`AnswerError`.
         """
+        with start_trace("answer", question=question) as active:
+            answer = self._answer(question)
+        return replace(answer, trace=active)
+
+    def _answer(self, question: str) -> Answer:
         if not question.strip():
             raise AnswerError("The question is empty")
 
-        passages = self._retriever.retrieve_scoped(question)
-        route = classify(question, self._generator)
+        with span("retrieve"):
+            passages = self._retriever.retrieve_scoped(question)
+        with span("route"):
+            route = classify(question, self._generator)
+        annotate(route=route.value)
 
         if route is Route.CONCEPTUAL:
             return self._answer_conceptual(question, passages.all_sources)
@@ -123,13 +139,19 @@ class AnswerPipeline:
     def _answer_data(self, question: str, passages: ScopedPassages) -> Answer:
         """Generate SQL, validate, execute, narrate — or fall back."""
         internal = passages.internal_only
-        sql_text = self._generate_sql(question, internal)
+        with span("sql_generation"):
+            sql_text = self._generate_sql(question, internal)
         if sql_text is None:
             logger.info("generator declined with %s; falling back to conceptual", NO_SQL)
+            annotate(route=Route.CONCEPTUAL.value)
             return self._answer_conceptual(question, passages.all_sources)
 
         safe = self._validate_with_retry(question, sql_text)
-        result = execute_safe_query(self._engine, safe, self._policy)
+        with span("execute"):
+            result = execute_safe_query(self._engine, safe, self._policy)
+            annotate(rows=len(result.rows), truncated=result.truncated, sql=safe.sql)
+            if result.elapsed_ms >= _NEAR_TIMEOUT_RATIO * self._policy.statement_timeout_ms:
+                annotate(near_timeout=True)
         sources = _sources_from(internal)
 
         if result.is_empty and not self._profile.has_data:
@@ -155,7 +177,8 @@ class AnswerPipeline:
         prompt = build_conceptual_prompt(question, passages)
         from rail_rag.rag.prompts import CONCEPTUAL_INSTRUCTIONS
 
-        text = self._generator.generate(system=CONCEPTUAL_INSTRUCTIONS, prompt=prompt)
+        with span("conceptual_answer"):
+            text = self._generator.generate(system=CONCEPTUAL_INSTRUCTIONS, prompt=prompt)
         return Answer(text=text, route=Route.CONCEPTUAL, sources=_sources_from(passages))
 
     def _generate_sql(self, question: str, passages: Sequence[Passage]) -> str | None:
@@ -167,21 +190,33 @@ class AnswerPipeline:
     def _validate_with_retry(self, question: str, sql_text: str) -> SafeQuery:
         """Validate, and on rejection feed the error back once."""
         try:
-            return validate_sql(sql_text, self._policy)
+            return self._guard(sql_text)
         except UnsafeQueryError as exc:
             rejection = str(exc)
             logger.info("first SQL attempt rejected: %s", rejection)
 
-        repair_prompt = build_repair_prompt(question, sql_text, rejection)
-        reply = self._generator.generate(system=self._system, prompt=repair_prompt)
-        repaired = _parse_sql(reply)
-        if repaired is None:
-            raise AnswerError("The model declined to write a query on the retry attempt")
+        with span("sql_repair"):
+            repair_prompt = build_repair_prompt(question, sql_text, rejection)
+            reply = self._generator.generate(system=self._system, prompt=repair_prompt)
+            repaired = _parse_sql(reply)
+            if repaired is None:
+                raise AnswerError("The model declined to write a query on the retry attempt")
 
         try:
-            return validate_sql(repaired, self._policy)
+            return self._guard(repaired)
         except UnsafeQueryError as second_error:
             raise AnswerError(f"The query was rejected twice: {second_error}") from second_error
+
+    def _guard(self, sql_text: str) -> SafeQuery:
+        """Validate under a ``guard`` span that records whether the query was rejected."""
+        with span("guard"):
+            try:
+                safe = validate_sql(sql_text, self._policy)
+            except UnsafeQueryError:
+                annotate(rejected=True)
+                raise
+            annotate(rejected=False)
+            return safe
 
     def _narrate(
         self,
@@ -199,7 +234,8 @@ class AnswerPipeline:
             truncated=result.truncated,
             passages=passages,
         )
-        return self._generator.generate(system=ANSWER_INSTRUCTIONS, prompt=prompt)
+        with span("narration"):
+            return self._generator.generate(system=ANSWER_INSTRUCTIONS, prompt=prompt)
 
 
 def _parse_sql(reply: str) -> str | None:
