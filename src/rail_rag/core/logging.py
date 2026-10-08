@@ -5,6 +5,14 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+TRACE_LOGGER = "rail_rag.trace"
+DEFAULT_TRACE_PATH = Path("logs/traces.jsonl")
+_TRACE_HANDLER_NAME = "rail_rag.trace.file"
+_TRACE_MAX_BYTES = 5 * 1024 * 1024
+_TRACE_BACKUPS = 3
 
 # (pattern, replacement) pairs applied to every formatted log message.
 _REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -54,3 +62,21 @@ def configure_logging(level: str = "INFO") -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level.upper())
+
+
+def configure_trace_sink(path: Path = DEFAULT_TRACE_PATH) -> None:
+    """Send ``rail_rag.trace`` to a rotating JSON-lines file and nowhere else; safe to repeat."""
+    trace_logger = logging.getLogger(TRACE_LOGGER)
+    # Explicit, because an entrypoint that never configured the root logger would inherit WARNING.
+    trace_logger.setLevel(logging.INFO)
+    trace_logger.propagate = False
+    if any(handler.get_name() == _TRACE_HANDLER_NAME for handler in trace_logger.handlers):
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        path, maxBytes=_TRACE_MAX_BYTES, backupCount=_TRACE_BACKUPS, encoding="utf-8"
+    )
+    handler.set_name(_TRACE_HANDLER_NAME)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    trace_logger.addHandler(handler)

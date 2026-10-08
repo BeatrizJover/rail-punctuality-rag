@@ -31,6 +31,7 @@ from rail_rag.api.schemas import (
 )
 from rail_rag.api.state import AppState, build_state
 from rail_rag.core.exceptions import RailRagError
+from rail_rag.core.logging import configure_trace_sink
 from rail_rag.db.schema import missing_tables
 from rail_rag.rag.exceptions import AnswerError
 from rail_rag.rag.pipeline import Answer
@@ -62,8 +63,12 @@ def create_app(state: AppState | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        ready = state
+        if ready is None:
+            configure_trace_sink()
+            ready = build_state()
         # Built once here rather than per request: see the module docstring.
-        setattr(app.state, _STATE_ATTR, state if state is not None else build_state())
+        setattr(app.state, _STATE_ATTR, ready)
         yield
 
     app = FastAPI(

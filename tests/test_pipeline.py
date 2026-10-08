@@ -7,18 +7,22 @@ integration tests that create a schema and execute real SQL.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Any
 
 import pytest
 from sqlalchemy import Engine
 
+from rail_rag.observability import start_trace
 from rail_rag.rag.exceptions import AnswerError
 from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
 from rail_rag.rag.providers.fake import FakeEmbedder, FakeGenerator
 from rail_rag.rag.router import Route, classify_lexically
+from rail_rag.rag.sql.executor import QueryResult
 from rail_rag.rag.sql.policy import SqlPolicy
 from rail_rag.rag.store.chunking import Chunk
 from rail_rag.rag.store.models import KbSchema
@@ -67,6 +71,15 @@ def test_answer_defaults_are_empty() -> None:
     assert answer.sql is None
     assert answer.result is None
     assert answer.sources == ()
+    assert answer.trace is None
+
+
+def test_the_trace_does_not_affect_answer_equality_or_repr() -> None:
+    bare = Answer(text="x", route=Route.CONCEPTUAL)
+    with start_trace("answer") as trace:
+        pass
+    assert replace(bare, trace=trace) == bare
+    assert "Trace" not in repr(replace(bare, trace=trace))
 
 
 # --- integration tests: real Postgres, fake LLM -------------------------------
@@ -333,3 +346,192 @@ def test_a_valid_reply_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger="rail_rag.rag.pipeline"):
         assert _parse_sql("```sql\nSELECT 1\n```") == "SELECT 1"
     assert caplog.text == ""
+
+
+# --- tracing: every construction and every answer leaves one structured trace --
+
+_BAD_SQL = "```sql\nSELECT * FROM gold.stg_fact_stop_event\n```"
+_GOOD_SQL = "```sql\nSELECT 1 AS n\n```"
+
+
+def _span_names(answer: Answer) -> list[str]:
+    assert answer.trace is not None
+    return [s.name for s in answer.trace.spans]
+
+
+def _emitted(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [json.loads(r.getMessage()) for r in caplog.records if r.name == "rail_rag.trace"]
+
+
+@pytest.mark.integration
+def test_the_data_path_traces_each_stage_in_order(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL, "The answer is 1."])
+    answer = pipeline.answer(_DATA_Q)
+
+    assert _span_names(answer) == [
+        "retrieve",
+        "route",
+        "sql_generation",
+        "guard",
+        "execute",
+        "narration",
+    ]
+    assert answer.trace is not None
+    assert answer.trace.kind == "answer"
+    assert answer.trace.route == "data"
+    assert answer.trace.error_class is None
+    assert answer.trace.total_ms >= 0
+    guard, execute = answer.trace.spans[3], answer.trace.spans[4]
+    assert guard.attributes == {"rejected": False}
+    assert execute.attributes == {"rows": 1, "truncated": False, "sql": answer.sql}
+    assert answer.sql is not None
+    assert "SELECT 1" in answer.sql
+
+
+@pytest.mark.integration
+def test_the_conceptual_path_traces_without_sql_stages(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, ["Punctuality is under 6 minutes."])
+    answer = pipeline.answer(_CONCEPTUAL_Q)
+
+    assert _span_names(answer) == ["retrieve", "route", "conceptual_answer"]
+    assert answer.trace is not None
+    assert answer.trace.route == "conceptual"
+
+
+@pytest.mark.integration
+def test_a_declined_query_reports_the_conceptual_fallback_as_its_route(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [NO_SQL, "It is a modelling decision."])
+    answer = pipeline.answer(_SUPERLATIVE_Q)
+
+    assert _span_names(answer) == ["retrieve", "route", "sql_generation", "conceptual_answer"]
+    assert answer.trace is not None
+    assert answer.trace.route == "conceptual"
+
+
+@pytest.mark.integration
+def test_the_repair_path_traces_both_guard_attempts(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_BAD_SQL, _GOOD_SQL, "ok"])
+    answer = pipeline.answer(_DATA_Q)
+
+    assert _span_names(answer) == [
+        "retrieve",
+        "route",
+        "sql_generation",
+        "guard",
+        "sql_repair",
+        "guard",
+        "execute",
+        "narration",
+    ]
+    assert answer.trace is not None
+    guards = [s.attributes["rejected"] for s in answer.trace.spans if s.name == "guard"]
+    assert guards == [True, False]
+    assert answer.trace.error_class is None
+
+
+@pytest.mark.integration
+def test_two_rejections_emit_a_trace_naming_the_error_and_the_guard(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_BAD_SQL, _BAD_SQL])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"), pytest.raises(AnswerError):
+        pipeline.answer(_DATA_Q)
+
+    (record,) = _emitted(caplog)
+    assert record["kind"] == "answer"
+    assert record["error_class"] == "AnswerError"
+    assert record["error_span"] == "guard"
+    assert [s["name"] for s in record["spans"]][-3:] == ["guard", "sql_repair", "guard"]
+
+
+@pytest.mark.integration
+def test_an_empty_question_still_emits_a_trace(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, ["unused"])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"), pytest.raises(AnswerError):
+        pipeline.answer("   ")
+
+    (record,) = _emitted(caplog)
+    assert (record["error_class"], record["error_span"]) == ("AnswerError", None)
+
+
+@pytest.mark.integration
+def test_an_empty_table_answer_has_no_narration_span(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(
+        clean_schema, kb_schema, ["```sql\nSELECT * FROM gold.fact_stop_event\n```"]
+    )
+    answer = pipeline.answer(_DATA_Q)
+    assert _span_names(answer)[-1] == "execute"
+
+
+@pytest.mark.integration
+def test_construction_emits_a_startup_trace_with_profile_and_context(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"):
+        _build(clean_schema, kb_schema, ["unused"])
+
+    (record,) = _emitted(caplog)
+    assert record["kind"] == "startup"
+    assert [s["name"] for s in record["spans"]] == ["profile", "context", "retriever"]
+    assert record["question_hash"] is None
+
+
+@pytest.mark.integration
+def test_the_emitted_answer_trace_never_contains_the_question(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL, "The answer is 1."])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"):
+        answer = pipeline.answer(_DATA_Q)
+
+    assert answer.trace is not None
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "rail_rag.trace"]
+    assert _DATA_Q not in line
+    assert json.loads(line)["request_id"] == answer.trace.request_id
+
+
+def _slow_execute(elapsed_ms: float) -> Any:
+    def execute(*_: Any) -> QueryResult:
+        return QueryResult(["n"], [(1,)], truncated=False, elapsed_ms=elapsed_ms)
+
+    return execute
+
+
+@pytest.mark.integration
+def test_a_query_at_eighty_percent_of_the_timeout_is_flagged(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL, "ok"])
+    # The default policy allows 5000 ms.
+    monkeypatch.setattr("rail_rag.rag.pipeline.execute_safe_query", _slow_execute(4000.0))
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.trace is not None
+    assert answer.trace.spans[4].attributes["near_timeout"] is True
+
+
+@pytest.mark.integration
+def test_a_query_under_the_threshold_is_not_flagged(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL, "ok"])
+    monkeypatch.setattr("rail_rag.rag.pipeline.execute_safe_query", _slow_execute(3999.0))
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.trace is not None
+    assert "near_timeout" not in answer.trace.spans[4].attributes

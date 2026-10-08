@@ -30,6 +30,9 @@ Thumbs.db
 # Gold export
 gold_export/
 
+# Runtime logs (rail_rag.trace writes logs/traces.jsonl)
+logs/
+
 # IDEs
 .vscode/
 

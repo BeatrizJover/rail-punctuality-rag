@@ -28,7 +28,7 @@ from pathlib import Path
 
 from rail_rag.core.config import get_settings
 from rail_rag.core.exceptions import RailRagError
-from rail_rag.core.logging import configure_logging
+from rail_rag.core.logging import configure_logging, configure_trace_sink
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
 from rail_rag.ingestion.derivations import (
@@ -489,6 +489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return a process exit code."""
     args = build_parser().parse_args(argv)
     configure_logging("DEBUG" if args.verbose else "INFO")
+    configure_trace_sink()
     try:
         if args.command == "db-ping":
             return _cmd_db_ping()
