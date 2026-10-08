@@ -30,6 +30,9 @@ Thumbs.db
 # Gold export
 gold_export/
 
+# Cached ground-truth results of the evaluation golden set
+.eval_cache/
+
 # Runtime logs (rail_rag.trace writes logs/traces.jsonl)
 logs/
 
