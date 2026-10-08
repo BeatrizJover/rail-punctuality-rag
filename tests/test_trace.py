@@ -10,6 +10,7 @@ import pytest
 
 from rail_rag.observability import (
     annotate,
+    capture_traces,
     record_provider_call,
     span,
     start_trace,
@@ -196,3 +197,57 @@ def test_a_nested_trace_restores_the_outer_one() -> None:
 
     assert [s.name for s in inner.spans] == ["profile"]
     assert [s.name for s in outer.spans] == ["retrieve"]
+
+
+# --- capture_traces ------------------------------------------------------------------
+
+
+def test_capture_collects_the_traces_finished_inside_it() -> None:
+    with capture_traces() as traces:
+        with start_trace("answer", question="one"), span("retrieve"):
+            pass
+        with start_trace("answer", question="two"):
+            pass
+
+    assert [t.question_length for t in traces] == [3, 3]
+    assert [s.name for s in traces[0].spans] == ["retrieve"]
+
+
+def test_capture_also_collects_the_trace_of_a_request_that_raised() -> None:
+    with (
+        capture_traces() as traces,
+        pytest.raises(ValueError),
+        start_trace("answer"),
+        span("execute"),
+    ):
+        raise ValueError("boom")
+
+    (trace,) = traces
+    assert (trace.error_class, trace.error_span) == ("ValueError", "execute")
+
+
+def test_traces_outside_a_capture_are_not_collected() -> None:
+    with start_trace("answer"):
+        pass
+    with capture_traces() as traces:
+        pass
+    assert traces == []
+
+
+def test_nested_captures_each_see_the_traces_finished_inside_them() -> None:
+    with capture_traces() as outer:
+        with start_trace("answer"):
+            pass
+        with capture_traces() as inner, start_trace("answer"):
+            pass
+
+    assert len(inner) == 1
+    assert len(outer) == 2
+
+
+def test_a_finished_capture_stops_collecting() -> None:
+    with capture_traces() as traces:
+        pass
+    with start_trace("answer"):
+        pass
+    assert traces == []

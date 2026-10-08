@@ -1,0 +1,14 @@
+# Evaluation settings. Kept under the provider's free-tier limits (5 requests per minute,
+# 20 generation requests per day): every retry attempt counts as a request too.
+
+# Spacing between generation calls.
+generation_rpm: 4
+
+# Hard stop for a day's run; the quota resets at midnight America/Los_Angeles.
+daily_generation_budget: 15
+
+# Replay stored generator replies, so a repeated run costs no quota.
+cache: true
+
+golden_set: eval/golden_set.yaml
+cache_dir: .eval_cache
