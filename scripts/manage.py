@@ -15,6 +15,8 @@ Usage (global ``-v`` goes before the subcommand):
  python scripts/manage.py kb-build [--corpus-dir DIR] [--parsed-dir DIR] [--force] [--profile P]
  python scripts/manage.py kb-search --query TEXT [--top-k N] [--profile P]
  python scripts/manage.py ask --question TEXT [--show-sql] [--profile P]
+ python scripts/manage.py eval [--layer {sql,e2e}] [--tag TAG ...] [--dry-run]
+     [--resume RUN_ID] [--no-cache] [--profile P]
 """
 
 import argparse
@@ -26,11 +28,15 @@ from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
+from sqlalchemy import Engine
+
 from rail_rag.core.config import get_settings
 from rail_rag.core.exceptions import RailRagError
 from rail_rag.core.logging import configure_logging, configure_trace_sink
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
+from rail_rag.eval.cli import Assembly, EvalBackend, EvalOptions, GeneratorWrapper, run_eval
+from rail_rag.eval.config import DEFAULT_EVAL_CONFIG, load_eval_config
 from rail_rag.ingestion.derivations import (
     assert_referential_integrity,
     derive_station_activity,
@@ -65,7 +71,7 @@ from rail_rag.ingestion.manifest import (
 from rail_rag.rag.pipeline import AnswerPipeline
 from rail_rag.rag.providers.config import ModelConfig, load_model_config
 from rail_rag.rag.providers.factory import build_embedder, build_generator
-from rail_rag.rag.sql.policy import load_retrieval_config
+from rail_rag.rag.sql.policy import RetrievalConfig, load_retrieval_config
 from rail_rag.rag.store.builder import build_knowledge_base
 from rail_rag.rag.store.glossary import load_declared_glossaries
 from rail_rag.rag.store.models import KbSchema, build_kb_schema
@@ -329,31 +335,59 @@ def _cmd_kb_search(query: str, top_k: int, profile: str | None) -> int:
     return EXIT_OK
 
 
+def _build_pipeline(
+    engine: Engine,
+    config: ModelConfig,
+    kb: KbSchema,
+    retrieval: RetrievalConfig,
+    wrap: GeneratorWrapper | None = None,
+) -> AnswerPipeline:
+    """Assemble the answering pipeline, optionally wrapping the generator (as ``eval`` does)."""
+    settings = get_settings()
+    generator = build_generator(config, settings.llm_api_key)
+    return AnswerPipeline(
+        engine,
+        wrap(generator, config) if wrap is not None else generator,
+        build_embedder(config, settings.llm_api_key),
+        kb,
+        retrieval.sql,
+        external_ids=load_registry(DEFAULT_SOURCES_REGISTRY).names,
+        min_similarity=config.embedding.min_similarity,
+        explain_plans=retrieval.sql_checks.explain,
+    )
+
+
+def _cmd_eval(options: EvalOptions, profile: str | None) -> int:
+    """Run the golden set (or plan the run) and write the report."""
+    settings = get_settings()
+    config, kb = _model_setup(profile)
+    retrieval = load_retrieval_config(Path("config/retrieval_config.yaml"))
+
+    def build(engine: Engine, wrap: GeneratorWrapper) -> Assembly:
+        pipeline = _build_pipeline(engine, config, kb, retrieval, wrap)
+        return Assembly(pipeline, config, pipeline.system_prompt)
+
+    backend = EvalBackend(
+        policy=retrieval.sql, open_engine=lambda: create_db_engine(settings), build=build
+    )
+    return run_eval(
+        options,
+        load_eval_config(DEFAULT_EVAL_CONFIG),
+        backend,
+        echo=lambda line: logger.info("%s", line),
+    )
+
+
 def _cmd_ask(
     question: str,
     show_sql: bool,
     profile: str | None,
 ) -> int:
     """Answer one question using the full pipeline."""
-    settings = get_settings()
     config, kb = _model_setup(profile)
-    engine = create_db_engine(settings)
+    engine = create_db_engine(get_settings())
     retrieval = load_retrieval_config(Path("config/retrieval_config.yaml"))
-    external_ids = load_registry(DEFAULT_SOURCES_REGISTRY).names
-
-    generator = build_generator(config, settings.llm_api_key)
-    embedder = build_embedder(config, settings.llm_api_key)
-
-    pipe = AnswerPipeline(
-        engine,
-        generator,
-        embedder,
-        kb,
-        retrieval.sql,
-        external_ids=external_ids,
-        min_similarity=config.embedding.min_similarity,
-        explain_plans=retrieval.sql_checks.explain,
-    )
+    pipe = _build_pipeline(engine, config, kb, retrieval)
     answer = pipe.answer(question)
 
     logger.info("[%s]", answer.route.value)
@@ -381,6 +415,16 @@ def _service_date(value: str) -> dt.date:
 def _add_profile_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--profile", default=None, help="model profile to use (default: the active one)"
+    )
+
+
+def _eval_options(args: argparse.Namespace) -> EvalOptions:
+    return EvalOptions(
+        layer=args.layer,
+        tags=tuple(args.tags),
+        dry_run=bool(args.dry_run),
+        resume=args.resume,
+        no_cache=bool(args.no_cache),
     )
 
 
@@ -483,6 +527,38 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--show-sql", action="store_true", help="print the generated SQL")
     _add_profile_option(ask)
 
+    evaluate = sub.add_parser(
+        "eval",
+        help="run the golden set and write a report",
+        description="Runs the golden set within the daily request budget and writes"
+        " reports/eval/<run>.md. A run that hits the budget stops cleanly; continue it with"
+        " --resume.",
+    )
+    evaluate.add_argument(
+        "--layer",
+        choices=("sql", "e2e"),
+        default=None,
+        help="sql: stop after execution, no narration (default); e2e: full answers",
+    )
+    evaluate.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        dest="tags",
+        metavar="TAG",
+        help="keep cases carrying this tag; repeat to keep cases carrying any of several",
+    )
+    evaluate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the cases, the estimate and the budget; make no call and open no connection",
+    )
+    evaluate.add_argument("--resume", metavar="RUN_ID", help="continue a stopped run")
+    evaluate.add_argument(
+        "--no-cache", action="store_true", help="bypass the generation cache (honest e2e latency)"
+    )
+    _add_profile_option(evaluate)
+
     return parser
 
 
@@ -518,6 +594,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_kb_search(args.query, int(args.top_k), args.profile)
         if args.command == "ask":
             return _cmd_ask(args.question, bool(args.show_sql), args.profile)
+        if args.command == "eval":
+            return _cmd_eval(_eval_options(args), args.profile)
         return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)
