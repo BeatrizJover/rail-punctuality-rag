@@ -33,12 +33,22 @@ class SqlPolicy(BaseModel):
     blocked_functions: frozenset[str] = frozenset()
 
 
+class SqlChecksConfig(BaseModel):
+    """Observation-only checks run on validated SQL before it executes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: Plans the query with ``EXPLAIN`` and records the estimate; never fails an answer.
+    explain: bool = False
+
+
 class RetrievalConfig(BaseModel):
     """Root of ``config/retrieval_config.yaml``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     sql: SqlPolicy
+    sql_checks: SqlChecksConfig = SqlChecksConfig()
 
 
 def load_retrieval_config(path: Path) -> RetrievalConfig:

@@ -32,3 +32,8 @@ sql:
     - pg_cancel_backend
     - set_config
     - pg_reload_conf
+
+# Observation only: nothing here rejects or rewrites a query.
+sql_checks:
+  # EXPLAIN (planning only) before execution; records cost, rows and partitions scanned.
+  explain: true

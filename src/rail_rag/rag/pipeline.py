@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
 
+from rail_rag.db.models import GOLD_SCHEMA, fact_stop_event
+from rail_rag.db.partitions import existing_partitions
 from rail_rag.observability import Trace, annotate, span, start_trace
 from rail_rag.rag.context import render_context
 from rail_rag.rag.context.profile import DataProfile, load_profile
@@ -34,8 +36,9 @@ from rail_rag.rag.prompts import (
 )
 from rail_rag.rag.providers.base import Embedder, TextGenerator
 from rail_rag.rag.router import Route, classify
-from rail_rag.rag.sql.executor import QueryResult, execute_safe_query
+from rail_rag.rag.sql.executor import QueryResult, execute_safe_query, explain_safe_query
 from rail_rag.rag.sql.guard import SafeQuery, validate_sql
+from rail_rag.rag.sql.lint import lint_sql
 from rail_rag.rag.sql.policy import SqlPolicy
 from rail_rag.rag.store.models import KbSchema
 from rail_rag.rag.store.retriever import Retriever, ScopedPassages
@@ -48,6 +51,7 @@ _MAX_SQL_ATTEMPTS = 2
 _MAX_LOGGED_REPLY = 400
 #: Share of the statement timeout above which a query is flagged as close to it.
 _NEAR_TIMEOUT_RATIO = 0.8
+_FACT_TABLE = f"{GOLD_SCHEMA}.{fact_stop_event.name}"
 
 
 @dataclass(frozen=True)
@@ -84,15 +88,20 @@ class AnswerPipeline:
         top_k: int = 4,
         external_ids: Collection[str] = (),
         min_similarity: float = 0.0,
+        explain_plans: bool = False,
     ) -> None:
         self._engine = engine
         self._generator = generator
         self._policy = policy
+        self._explain_plans = explain_plans
 
         with start_trace("startup"):
             with span("profile"):
                 profile = load_profile(engine)
             self._profile = profile
+            with span("partitions"):
+                self._partitions_total = len(existing_partitions(engine))
+                annotate(count=self._partitions_total)
             with span("context"):
                 self._system = build_sql_system(render_context(policy, profile))
             with span("retriever"):
@@ -147,6 +156,8 @@ class AnswerPipeline:
             return self._answer_conceptual(question, passages.all_sources)
 
         safe = self._validate_with_retry(question, sql_text)
+        with span("sql_checks"):
+            self._check_sql(safe)
         with span("execute"):
             result = execute_safe_query(self._engine, safe, self._policy)
             annotate(rows=len(result.rows), truncated=result.truncated, sql=safe.sql)
@@ -217,6 +228,31 @@ class AnswerPipeline:
                 raise
             annotate(rejected=False)
             return safe
+
+    def _check_sql(self, safe: SafeQuery) -> None:
+        """Record lint findings and, when enabled, the plan estimate; never fails the answer."""
+        try:
+            findings = lint_sql(safe.sql)
+        except Exception as exc:
+            findings = ()
+            annotate(lint_error=type(exc).__name__)
+        annotate(lint=list(findings))
+        for code in findings:
+            logger.warning("SQL lint finding: %s", code)
+
+        if not self._explain_plans:
+            return
+        try:
+            estimate = explain_safe_query(self._engine, safe, self._policy)
+        except Exception as exc:
+            annotate(plan_error=type(exc).__name__)
+            return
+        annotate(
+            plan_total_cost=round(estimate.total_cost, 2),
+            plan_rows=round(estimate.rows),
+            partitions_scanned=estimate.partitions_scanned.get(_FACT_TABLE, 0),
+            partitions_total=self._partitions_total,
+        )
 
     def _narrate(
         self,

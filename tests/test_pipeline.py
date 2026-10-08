@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy import Engine
 
-from rail_rag.observability import start_trace
+from rail_rag.observability import Span, start_trace
 from rail_rag.rag.exceptions import AnswerError
 from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
@@ -97,6 +97,7 @@ def _build(
     *,
     external_ids: Collection[str] = (),
     min_similarity: float = 0.0,
+    explain_plans: bool = False,
 ) -> tuple[AnswerPipeline, FakeGenerator]:
     """Construct a pipeline against a live schema with a scripted generator."""
     generator = FakeGenerator(responses)
@@ -109,6 +110,7 @@ def _build(
         SqlPolicy(allowed_tables=_ALLOWED),
         external_ids=external_ids,
         min_similarity=min_similarity,
+        explain_plans=explain_plans,
     )
     return pipeline, generator
 
@@ -359,6 +361,12 @@ def _span_names(answer: Answer) -> list[str]:
     return [s.name for s in answer.trace.spans]
 
 
+def _span(answer: Answer, name: str) -> Span:
+    assert answer.trace is not None
+    (found,) = [s for s in answer.trace.spans if s.name == name]
+    return found
+
+
 def _emitted(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
     return [json.loads(r.getMessage()) for r in caplog.records if r.name == "rail_rag.trace"]
 
@@ -375,6 +383,7 @@ def test_the_data_path_traces_each_stage_in_order(
         "route",
         "sql_generation",
         "guard",
+        "sql_checks",
         "execute",
         "narration",
     ]
@@ -383,7 +392,7 @@ def test_the_data_path_traces_each_stage_in_order(
     assert answer.trace.route == "data"
     assert answer.trace.error_class is None
     assert answer.trace.total_ms >= 0
-    guard, execute = answer.trace.spans[3], answer.trace.spans[4]
+    guard, execute = _span(answer, "guard"), _span(answer, "execute")
     assert guard.attributes == {"rejected": False}
     assert execute.attributes == {"rows": 1, "truncated": False, "sql": answer.sql}
     assert answer.sql is not None
@@ -428,6 +437,7 @@ def test_the_repair_path_traces_both_guard_attempts(
         "guard",
         "sql_repair",
         "guard",
+        "sql_checks",
         "execute",
         "narration",
     ]
@@ -486,7 +496,7 @@ def test_construction_emits_a_startup_trace_with_profile_and_context(
 
     (record,) = _emitted(caplog)
     assert record["kind"] == "startup"
-    assert [s["name"] for s in record["spans"]] == ["profile", "context", "retriever"]
+    assert [s["name"] for s in record["spans"]] == ["profile", "partitions", "context", "retriever"]
     assert record["question_hash"] is None
 
 
@@ -522,7 +532,7 @@ def test_a_query_at_eighty_percent_of_the_timeout_is_flagged(
     answer = pipeline.answer(_DATA_Q)
 
     assert answer.trace is not None
-    assert answer.trace.spans[4].attributes["near_timeout"] is True
+    assert _span(answer, "execute").attributes["near_timeout"] is True
 
 
 @pytest.mark.integration
@@ -534,4 +544,114 @@ def test_a_query_under_the_threshold_is_not_flagged(
     answer = pipeline.answer(_DATA_Q)
 
     assert answer.trace is not None
-    assert "near_timeout" not in answer.trace.spans[4].attributes
+    assert "near_timeout" not in _span(answer, "execute").attributes
+
+
+# --- SQL quality signals: lint findings and plan estimates --------------------
+
+_VIA_DIMENSION_SQL = (
+    "```sql\nSELECT SUM(f.stop_events) AS n FROM gold.fact_stop_event f"
+    " JOIN gold.dim_date d ON d.date_key = f.date_key WHERE d.month = 3\n```"
+)
+_PRUNED_SQL = (
+    "```sql\nSELECT SUM(f.stop_events) AS n FROM gold.fact_stop_event f"
+    " WHERE f.date_key >= DATE '2025-03-01' AND f.date_key < DATE '2025-04-01'\n```"
+)
+
+
+@pytest.mark.integration
+def test_sql_checks_sits_between_the_guard_and_execute(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_PRUNED_SQL, "ok"], explain_plans=True)
+    answer = pipeline.answer(_DATA_Q)
+
+    names = _span_names(answer)
+    assert names.index("guard") + 1 == names.index("sql_checks")
+    assert names.index("sql_checks") + 1 == names.index("execute")
+    checks = _span(answer, "sql_checks").attributes
+    assert checks["lint"] == []
+    assert checks["partitions_scanned"] == 1
+    assert checks["partitions_total"] == 36
+    assert checks["plan_total_cost"] > 0
+    assert checks["plan_rows"] >= 1
+
+
+@pytest.mark.integration
+def test_sql_checks_follows_the_repair_when_there_is_one(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_BAD_SQL, _GOOD_SQL, "ok"])
+    names = _span_names(pipeline.answer(_DATA_Q))
+    assert names[-4:] == ["guard", "sql_checks", "execute", "narration"]
+    assert names[-5] == "sql_repair"
+
+
+@pytest.mark.integration
+def test_a_dimension_filter_is_flagged_and_logged_and_scans_every_partition(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_VIA_DIMENSION_SQL, "ok"], explain_plans=True)
+    with caplog.at_level(logging.WARNING, logger="rail_rag.rag.pipeline"):
+        answer = pipeline.answer(_DATA_Q)
+
+    checks = _span(answer, "sql_checks").attributes
+    assert checks["lint"] == ["fact_without_partition_filter"]
+    assert checks["partitions_scanned"] == checks["partitions_total"] == 36
+    assert "fact_without_partition_filter" in caplog.text
+
+
+@pytest.mark.integration
+def test_without_explain_only_the_lint_is_recorded(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_VIA_DIMENSION_SQL, "ok"])
+    answer = pipeline.answer(_DATA_Q)
+    assert _span(answer, "sql_checks").attributes == {"lint": ["fact_without_partition_filter"]}
+
+
+@pytest.mark.integration
+def test_a_failing_plan_check_is_recorded_and_the_answer_completes(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any) -> Any:
+        raise RuntimeError("planner exploded")
+
+    monkeypatch.setattr("rail_rag.rag.pipeline.explain_safe_query", broken)
+    pipeline, _ = _build(
+        clean_schema, kb_schema, [_GOOD_SQL, "The answer is 1."], explain_plans=True
+    )
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.text == "The answer is 1."
+    assert answer.trace is not None
+    assert answer.trace.error_class is None
+    assert _span(answer, "sql_checks").attributes == {"lint": [], "plan_error": "RuntimeError"}
+    assert "narration" in _span_names(answer)
+
+
+@pytest.mark.integration
+def test_a_failing_lint_never_fails_the_answer(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any) -> Any:
+        raise ValueError("cannot scope this")
+
+    monkeypatch.setattr("rail_rag.rag.pipeline.lint_sql", broken)
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL, "The answer is 1."])
+    answer = pipeline.answer(_DATA_Q)
+
+    assert answer.text == "The answer is 1."
+    assert _span(answer, "sql_checks").attributes == {"lint": [], "lint_error": "ValueError"}
+
+
+@pytest.mark.integration
+def test_the_startup_trace_records_the_partition_count(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"):
+        _build(clean_schema, kb_schema, ["unused"])
+
+    (record,) = _emitted(caplog)
+    (partitions,) = [s for s in record["spans"] if s["name"] == "partitions"]
+    assert partitions["attributes"] == {"count": 36}

@@ -15,14 +15,17 @@ Three defences apply at execution time, none of which trusts the guard:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import Engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from rail_rag.db.partitions import partition_keys
 from rail_rag.rag.exceptions import QueryExecutionError
 from rail_rag.rag.sql.guard import SafeQuery
 from rail_rag.rag.sql.policy import SqlPolicy
@@ -102,3 +105,53 @@ def run_query(engine: Engine, sql: str, policy: SqlPolicy) -> QueryResult:
     from rail_rag.rag.sql.guard import validate_sql
 
     return execute_safe_query(engine, validate_sql(sql, policy), policy)
+
+
+@dataclass(frozen=True)
+class PlanEstimate:
+    """What the planner expects a query to cost, without running it."""
+
+    total_cost: float
+    rows: float
+    #: Distinct child partitions in the plan, keyed by the partitioned parent's qualified name.
+    partitions_scanned: Mapping[str, int]
+
+
+def explain_safe_query(engine: Engine, query: SafeQuery, policy: SqlPolicy) -> PlanEstimate:
+    """Plan a validated query without executing it, under the same defences as execution.
+
+    Raises:
+        QueryExecutionError: if planning fails, times out, or the database is down.
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+            conn.execute(text(f"SET LOCAL statement_timeout = {policy.statement_timeout_ms}"))
+            raw = conn.execute(text(f"EXPLAIN (FORMAT JSON) {query.sql}")).scalar_one()
+            conn.rollback()
+    except SQLAlchemyError as exc:
+        raise QueryExecutionError(f"Plan failed: {type(exc).__name__}") from exc
+
+    plan = (json.loads(raw) if isinstance(raw, str) else raw)[0]["Plan"]
+    return PlanEstimate(
+        total_cost=float(plan["Total Cost"]),
+        rows=float(plan["Plan Rows"]),
+        partitions_scanned=_partitions_in_plan(plan),
+    )
+
+
+def _partitions_in_plan(plan: dict[str, Any]) -> dict[str, int]:
+    """Count distinct children of each partitioned table, by the ``<parent>_`` name prefix."""
+    children: dict[str, set[str]] = {parent: set() for parent in partition_keys()}
+    pending = [plan]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.get("Plans", []))
+        relation = node.get("Relation Name")
+        if relation is None:
+            continue
+        for parent, found in children.items():
+            # The plan names no schema outside VERBOSE; the allow-list keeps a lookalike out.
+            if relation.startswith(f"{parent.split('.', 1)[1]}_"):
+                found.add(relation)
+    return {parent: len(found) for parent, found in children.items()}

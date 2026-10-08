@@ -67,7 +67,8 @@ def build_state(
     """
     resolved = settings or get_settings()
     config = load_model_config(resolved.llm_config_path, profile=profile)
-    policy = load_retrieval_config(retrieval_config).sql
+    retrieval = load_retrieval_config(retrieval_config)
+    policy = retrieval.sql
     # A missing or invalid registry stops startup. Degrading to an empty exclusion
     # list would switch the source filter off without anyone noticing.
     external_ids = load_registry(sources_registry).names
@@ -83,6 +84,7 @@ def build_state(
         policy,
         external_ids=external_ids,
         min_similarity=config.embedding.min_similarity,
+        explain_plans=retrieval.sql_checks.explain,
     )
     logger.info(
         "Pipeline ready (provider=%s, generation=%s, embedding=%s, external sources=%d,"
