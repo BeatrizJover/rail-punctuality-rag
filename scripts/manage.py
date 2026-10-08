@@ -352,6 +352,7 @@ def _cmd_ask(
         retrieval.sql,
         external_ids=external_ids,
         min_similarity=config.embedding.min_similarity,
+        explain_plans=retrieval.sql_checks.explain,
     )
     answer = pipe.answer(question)
 

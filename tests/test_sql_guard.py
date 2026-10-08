@@ -51,6 +51,16 @@ def test_repo_policy_loads_and_excludes_staging() -> None:
     assert not any(name.startswith("ops.") for name in policy.allowed_tables)
 
 
+def test_repo_config_enables_the_plan_check() -> None:
+    assert load_retrieval_config(REPO_CONFIG).sql_checks.explain is True
+
+
+def test_the_plan_check_is_off_when_the_section_is_absent(tmp_path: Path) -> None:
+    config = tmp_path / "retrieval_config.yaml"
+    config.write_text("sql:\n  allowed_tables: [gold.dim_date]\n", encoding="utf-8")
+    assert load_retrieval_config(config).sql_checks.explain is False
+
+
 def test_realistic_analytical_query_is_accepted() -> None:
     safe = validate_sql(PUNCTUALITY_QUERY, POLICY)
     assert "gold.fact_stop_event" in safe.tables

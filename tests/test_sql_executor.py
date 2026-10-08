@@ -8,13 +8,15 @@ guard, which is why the ``SafeQuery`` objects here are built by hand.
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 import pytest
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, event, text
 
 from rail_rag.db.models import dim_relation, dim_station, fact_stop_event
+from rail_rag.db.partitions import existing_partitions
 from rail_rag.rag.exceptions import QueryExecutionError
-from rail_rag.rag.sql.executor import execute_safe_query, run_query
+from rail_rag.rag.sql.executor import execute_safe_query, explain_safe_query, run_query
 from rail_rag.rag.sql.guard import SafeQuery
 from rail_rag.rag.sql.policy import SqlPolicy
 
@@ -164,3 +166,71 @@ def test_punctuality_ratio_query_runs_end_to_end(seeded: Engine) -> None:
         POLICY,
     )
     assert result.rows[0][0] == pytest.approx(0.5)
+
+
+# --- plan estimates ------------------------------------------------------------
+
+_FACT = "gold.fact_stop_event"
+_MARCH = (
+    "SELECT SUM(f.stop_events) FROM gold.fact_stop_event f"
+    " WHERE f.date_key >= DATE '2025-03-01' AND f.date_key < DATE '2025-04-01'"
+)
+_VIA_DIMENSION = (
+    "SELECT SUM(f.stop_events) FROM gold.fact_stop_event f"
+    " JOIN gold.dim_date d ON d.date_key = f.date_key WHERE d.year = 2025 AND d.month = 3"
+)
+
+
+def test_a_literal_month_filter_plans_a_single_partition(clean_schema: Engine) -> None:
+    estimate = explain_safe_query(clean_schema, _unchecked(_MARCH), POLICY)
+    assert estimate.partitions_scanned[_FACT] == 1
+    assert estimate.total_cost > 0
+    assert estimate.rows >= 1
+
+
+def test_a_dimension_filter_plans_every_partition(clean_schema: Engine) -> None:
+    estimate = explain_safe_query(clean_schema, _unchecked(_VIA_DIMENSION), POLICY)
+    total = len(existing_partitions(clean_schema))
+    assert total > 1
+    assert estimate.partitions_scanned[_FACT] == total
+
+
+def test_a_query_that_never_touches_the_fact_scans_no_partitions(clean_schema: Engine) -> None:
+    estimate = explain_safe_query(clean_schema, _unchecked("SELECT 1 FROM gold.dim_date"), POLICY)
+    assert estimate.partitions_scanned[_FACT] == 0
+
+
+def test_explain_runs_read_only_with_a_timeout_and_rolls_back(clean_schema: Engine) -> None:
+    statements: list[str] = []
+    transaction_events: list[str] = []
+
+    def record_statement(*args: Any) -> None:
+        statements.append(args[2])
+
+    def record_rollback(_: Any) -> None:
+        transaction_events.append("rollback")
+
+    def record_commit(_: Any) -> None:
+        transaction_events.append("commit")
+
+    event.listen(clean_schema, "before_cursor_execute", record_statement)
+    event.listen(clean_schema, "rollback", record_rollback)
+    event.listen(clean_schema, "commit", record_commit)
+    try:
+        explain_safe_query(clean_schema, _unchecked(_MARCH), POLICY)
+    finally:
+        event.remove(clean_schema, "before_cursor_execute", record_statement)
+        event.remove(clean_schema, "rollback", record_rollback)
+        event.remove(clean_schema, "commit", record_commit)
+
+    assert statements[0] == "SET TRANSACTION READ ONLY"
+    assert statements[1] == f"SET LOCAL statement_timeout = {POLICY.statement_timeout_ms}"
+    assert statements[2].startswith("EXPLAIN (FORMAT JSON) ")
+    assert not any("ANALYZE" in statement.upper() for statement in statements)
+    assert "commit" not in transaction_events
+    assert "rollback" in transaction_events
+
+
+def test_a_failing_plan_surfaces_as_a_query_execution_error(clean_schema: Engine) -> None:
+    with pytest.raises(QueryExecutionError, match="Plan failed"):
+        explain_safe_query(clean_schema, _unchecked("SELECT * FROM gold.no_such_table"), POLICY)

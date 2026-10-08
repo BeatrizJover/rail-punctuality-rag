@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 
-from sqlalchemy import Connection, Engine, text
+from sqlalchemy import Connection, Engine, MetaData, text
 
-from rail_rag.db.models import GOLD_SCHEMA, fact_stop_event
+from rail_rag.db.models import GOLD_SCHEMA, fact_stop_event, metadata
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,8 @@ BASELINE_START = dt.date(2024, 1, 1)
 BASELINE_END = dt.date(2027, 1, 1)
 
 _PARENT = fact_stop_event.name
+
+_PARTITION_BY = re.compile(r"\s*(?:RANGE|LIST|HASH)\s*\(\s*(\w+)\s*\)\s*", re.IGNORECASE)
 
 
 def _first_of_next_month(day: dt.date) -> dt.date:
@@ -73,3 +76,17 @@ def existing_partitions(engine: Engine) -> set[str]:
     with engine.connect() as conn:
         rows = conn.execute(statement, {"parent": _PARENT, "schema": GOLD_SCHEMA}).scalars()
         return {str(name) for name in rows}
+
+
+def partition_keys(models: MetaData = metadata) -> dict[str, str]:
+    """Map each partitioned table, qualified and lower-case, to its single partition key column."""
+    keys: dict[str, str] = {}
+    for name, table in models.tables.items():
+        clause = table.dialect_options["postgresql"]["partition_by"]
+        if clause is None:
+            continue
+        match = _PARTITION_BY.fullmatch(str(clause))
+        if match is None:
+            raise ValueError(f"Unsupported partition_by on {name}: {clause!r}")
+        keys[name.lower()] = match.group(1).lower()
+    return keys
