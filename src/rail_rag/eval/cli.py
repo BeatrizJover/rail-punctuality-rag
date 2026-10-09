@@ -122,7 +122,7 @@ def _plan(options: EvalOptions, config: EvalConfig, started: dt.datetime) -> _Pl
     if options.resume is not None:
         run_id = options.resume
         results_path, meta_path = runs_dir / f"{run_id}.jsonl", runs_dir / f"{run_id}.meta.json"
-        if not (results_path.exists() and meta_path.exists()):
+        if not meta_path.exists():
             raise ConfigError(f"No run {run_id!r} to resume under {runs_dir}")
         meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
         layer: Layer = meta["layer"]
