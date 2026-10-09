@@ -29,6 +29,7 @@ from rail_rag.eval.cli import (
 )
 from rail_rag.eval.config import EvalConfig
 from rail_rag.eval.expected import cache_key
+from rail_rag.rag.exceptions import ProviderError
 from rail_rag.rag.pipeline import AnswerPipeline
 from rail_rag.rag.providers.config import load_model_config
 from rail_rag.rag.providers.fake import FakeEmbedder
@@ -112,6 +113,14 @@ def test_the_default_layer_is_sql(tmp_path: Path) -> None:
 def test_resume_requires_an_existing_run(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="No run 'missing'"):
         run_eval(EvalOptions(resume="missing"), _config(tmp_path), _UNTOUCHABLE, now=lambda: _NOW)
+
+
+def test_resume_needs_the_meta_file_even_when_results_exist(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    (config.cache_dir / "runs").mkdir(parents=True)
+    (config.cache_dir / "runs" / "orphan.jsonl").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="No run 'orphan' to resume"):
+        run_eval(EvalOptions(resume="orphan"), config, _UNTOUCHABLE, now=lambda: _NOW)
 
 
 def test_a_tag_that_selects_nothing_is_refused(tmp_path: Path) -> None:
@@ -269,6 +278,17 @@ _REPLIES = {"[ok]": _sql("SELECT 1 AS n"), "[wrong]": _sql("SELECT 2 AS n")}
 _RUN_ID = "20261008T120000Z-sql"
 
 
+class _Outage(Scripted):
+    """Scripted replies that fail with a provider error while ``down``."""
+
+    down = True
+
+    def generate(self, *, system: str, prompt: str) -> str:
+        if self.down:
+            raise ProviderError("Gemini generation failed: ServerError")
+        return super().generate(system=system, prompt=prompt)
+
+
 @pytest.mark.integration
 def test_a_stopped_run_resumes_to_a_complete_report(
     clean_schema: Engine, kb_schema: KbSchema, tmp_path: Path, golden: Path
@@ -321,6 +341,39 @@ def test_a_stopped_run_resumes_to_a_complete_report(
     assert document["startup"]["spans"][0]["name"] == "profile"
     assert (cache / "window.json").exists()
     assert len(list((cache / "expected").glob("*.json"))) == 2
+
+
+@pytest.mark.integration
+def test_a_run_stopped_at_its_first_case_resumes_to_a_complete_report(
+    clean_schema: Engine, kb_schema: KbSchema, tmp_path: Path, golden: Path
+) -> None:
+    _populate_kb(clean_schema, kb_schema)
+    generator = _Outage(_REPLIES)
+    backend = _backend(clean_schema, kb_schema, generator)
+    runs = tmp_path / "cache" / "runs"
+
+    code, _ = _run(tmp_path, backend, EvalOptions(), _config(tmp_path, golden_set=golden))
+
+    assert code == EXIT_INCOMPLETE
+    assert (runs / f"{_RUN_ID}.meta.json").exists()
+    assert not (runs / f"{_RUN_ID}.jsonl").exists()
+
+    generator.down = False
+    code, lines = _run(
+        tmp_path,
+        backend,
+        EvalOptions(resume=_RUN_ID),
+        _config(tmp_path, golden_set=golden, daily_generation_budget=10),
+    )
+
+    assert code == EXIT_OK
+    assert any(line.startswith("COMPLETE") for line in lines)
+    results = (runs / f"{_RUN_ID}.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(x)["id"] for x in results] == ["data_ok", "data_wrong", "concept_threshold"]
+    meta = json.loads((runs / f"{_RUN_ID}.meta.json").read_text(encoding="utf-8"))
+    assert [s["answered"] for s in meta["sessions"]] == [0, 3]
+    report = (tmp_path / "reports" / f"{_RUN_ID}.md").read_text(encoding="utf-8")
+    assert "**COMPLETE** — 3 of 3 cases." in report
 
 
 @pytest.mark.integration
