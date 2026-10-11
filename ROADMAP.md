@@ -19,7 +19,7 @@ The v0.1 scope is closed: the system runs end to end locally on three years of r
 | --- | --- | :---: |
 | P1-1 | Pin the versions of the gate tools (`ruff`, `mypy`) so local and CI results match | ⏳ |
 | P1-2 | General application logging when the API starts. The trace sink is already configured at API startup; the API's own `INFO` logs are still not shown, and `RAIL_RAG_LOG_LEVEL` is declared in the settings but read by nothing | ⏳ |
-| P1-3 | **Slow startup** (5–7 min on 61M rows). Measured: the startup trace puts about 99.98% of pipeline construction in the `profile` span (402 s in one run). The cause is `load_profile` running `count(*)` and two `count(DISTINCT …)` aggregates over the whole fact table. Fix: take each figure from a cheap source (index `min`/`max` for the coverage window, catalogue statistics for approximate counts, the load audit for row counts) and keep full-table distincts off the startup path | ⏳ |
+| P1-3 | **Slow first start after a load.** The profile is now stored in `ops.profile_snapshot` and reused (E2-1), but the first start after a load still computes the full profile: `count(*)` and two `count(DISTINCT …)` over the whole fact table (about 6 min on 61M rows). Refresh the snapshot at the end of the load and after `finalize`. `derive_station_activity` writes no `load_runs` row, so a re-run on its own leaves `sample_stations` stale until the next load | ⏳ |
 | P1-4 | **Slow aggregations.** Measured: a filter through `dim_date` gives the planner no predicate on the partition key, so a one-month question plans 36 of 36 monthly partitions against 1 of 36 for the same month as a literal `f.date_key` range (estimated cost about 1.50M against 46.8K). The `fact_without_partition_filter` lint flags it. Pruning alone is not enough for year-level questions: a year still plans 12 of 36 partitions and is only about 2.3× cheaper by estimated cost, so daily rollups by station and by relation are needed | ⏳ |
 | P1-5 | Minimum-volume rule for ratio rankings, next to the punctuality formula in the semantic rules | ⏳ |
 | P1-6 | Detect truncated model responses (`finish_reason`) instead of treating them as format errors | ⏳ |
@@ -32,6 +32,7 @@ The v0.1 scope is closed: the system runs end to end locally on three years of r
 | P1-13 | Golden set review after the baseline: reword the two relation-ranking questions (`ranking_worst_relations_2025`, `ranking_worst_relation_full_period`) to state whether directions are combined; reconsider the multilingual `known_limitation` flag once the `e2e` layer is measured | ⏳ |
 | P1-14 | Trace fidelity: the trace keeps no SQL for a query whose execution fails (the six timed-out baseline queries have none), so the audit trail loses exactly the failures. The `sql` attribute is set on the `execute` span only after the query returns; record the SQL before execution | ✅ |
 | P1-15 | Report accuracy: retry attempts from an unrecorded case show only under "Budget used today", because the case's trace is not part of the results file. Surface them in the report | ⏳ |
+| P1-16 | Profile samples: the operator and relation samples come from `SELECT DISTINCT … LIMIT 12` without `ORDER BY`, so a recomputed snapshot may pick different rows and change the prompt. Add a deterministic order together with the next prompt-changing step (E2-3/E2-4) | ⏳ |
 
 ## P2 — Visible improvements
 
@@ -80,7 +81,7 @@ The baseline makes timeouts the main cause of failed data cases, so the post-fix
 
 | # | Item | Status |
 | --- | --- | :---: |
-| E2-1 | Cheap startup profile (see P1-3) | 📋 |
+| E2-1 | Cheap startup profile (see P1-3): the profile is stored in `ops.profile_snapshot` and reused while the fact's coverage and the latest load run are unchanged | ✅ |
 | E2-2 | Postgres settings: `jit`, `work_mem`, `shared_buffers` | 📋 |
 | E2-3 | Daily rollups by station and by relation (see P1-4) | 📋 |
 | E2-4 | SQL rules: prefer the rollups, and always bound `f.date_key` with literal ranges | 📋 |

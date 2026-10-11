@@ -15,13 +15,24 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from sqlalchemy import Engine, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from rail_rag.core.exceptions import DatabaseError
-from rail_rag.db.models import dim_date, dim_relation, dim_station, fact_stop_event
+from rail_rag.db.models import (
+    PROFILE_SNAPSHOT_ID,
+    dim_date,
+    dim_relation,
+    dim_station,
+    fact_stop_event,
+    load_runs,
+    profile_snapshot,
+)
+from rail_rag.observability import annotate
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +117,123 @@ class DataProfile:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class _SnapshotKey:
+    """What must be unchanged for a stored profile to still describe the data."""
+
+    sample_size: int
+    fact_min_date: dt.date | None
+    fact_max_date: dt.date | None
+    last_run_id: int | None
+    last_run_finished_at: dt.datetime | None
+
+
+_DATE_FIELDS = ("fact_min_date", "fact_max_date", "calendar_min_date", "calendar_max_date")
+
+
 def load_profile(engine: Engine, *, sample_size: int = DEFAULT_SAMPLE_SIZE) -> DataProfile:
-    """Measure the Gold tables.
+    """Return the Gold profile, reusing the stored one while the data is unchanged.
+
+    The stored profile is valid while the fact's coverage and the latest load run
+    are the same; anything else recomputes it with the exact queries and stores it.
+
+    Raises:
+        DatabaseError: if the database is unreachable or the query fails.
+    """
+    key = _snapshot_key(engine, sample_size)
+    if key is not None:
+        stored = _read_snapshot(engine, key)
+        if stored is not None:
+            annotate(source="snapshot")
+            logger.info("reused the stored Gold profile (%d fact rows)", stored.fact_rows)
+            return stored
+
+    profile = _measure(engine, sample_size=sample_size)
+    if key is not None:
+        _write_snapshot(engine, key, profile)
+    annotate(source="computed")
+    return profile
+
+
+def _snapshot_key(engine: Engine, sample_size: int) -> _SnapshotKey | None:
+    """Read the validity key, or ``None`` when the snapshot cannot be used at all."""
+    try:
+        with engine.connect() as conn:
+            first, last = conn.execute(
+                select(func.min(fact_stop_event.c.date_key), func.max(fact_stop_event.c.date_key))
+            ).one()
+            run_id, finished_at = conn.execute(
+                select(func.max(load_runs.c.id), func.max(load_runs.c.finished_at))
+            ).one()
+    except SQLAlchemyError as exc:
+        logger.warning("profile snapshot unavailable: %s", type(exc).__name__)
+        return None
+    return _SnapshotKey(sample_size, first, last, run_id, finished_at)
+
+
+def _read_snapshot(engine: Engine, key: _SnapshotKey) -> DataProfile | None:
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(profile_snapshot).where(profile_snapshot.c.id == PROFILE_SNAPSHOT_ID)
+            ).one_or_none()
+        if row is None:
+            return None
+        stored = _SnapshotKey(
+            row.sample_size,
+            row.fact_min_date,
+            row.fact_max_date,
+            row.last_run_id,
+            row.last_run_finished_at,
+        )
+        return _from_payload(row.profile) if stored == key else None
+    except SQLAlchemyError as exc:
+        logger.warning("profile snapshot unreadable: %s", type(exc).__name__)
+    except (KeyError, TypeError, ValueError):
+        logger.warning("ignoring a malformed profile snapshot")
+    return None
+
+
+def _write_snapshot(engine: Engine, key: _SnapshotKey, profile: DataProfile) -> None:
+    values = {
+        "sample_size": key.sample_size,
+        "fact_min_date": key.fact_min_date,
+        "fact_max_date": key.fact_max_date,
+        "last_run_id": key.last_run_id,
+        "last_run_finished_at": key.last_run_finished_at,
+        "profile": _to_payload(profile),
+        "computed_at": func.now(),
+    }
+    statement = insert(profile_snapshot).values(id=PROFILE_SNAPSHOT_ID, **values)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                statement.on_conflict_do_update(index_elements=["id"], set_=values),
+            )
+    except SQLAlchemyError as exc:
+        logger.warning("could not store the profile snapshot: %s", type(exc).__name__)
+
+
+def _to_payload(profile: DataProfile) -> dict[str, Any]:
+    payload = asdict(profile)
+    for name in _DATE_FIELDS:
+        value = payload[name]
+        payload[name] = None if value is None else value.isoformat()
+    return payload
+
+
+def _from_payload(payload: dict[str, Any]) -> DataProfile:
+    fields = dict(payload)
+    for name in _DATE_FIELDS:
+        value = fields[name]
+        fields[name] = None if value is None else dt.date.fromisoformat(value)
+    for name in ("sample_stations", "sample_operators", "sample_relations"):
+        fields[name] = tuple(fields[name])
+    return DataProfile(**fields)
+
+
+def _measure(engine: Engine, *, sample_size: int) -> DataProfile:
+    """Run the exact aggregates and samples against the Gold tables.
 
     Raises:
         DatabaseError: if the database is unreachable or the query fails.

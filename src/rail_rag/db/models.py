@@ -28,6 +28,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import TypeEngine
 
 #: Dedicated PostgreSQL schema, so Gold tables never collide with future
@@ -221,4 +222,26 @@ load_runs = Table(
     ),
 )
 
-ORDERED_OPS_TABLES: tuple[Table, ...] = (load_runs,)
+#: Id of the only row ``profile_snapshot`` may hold.
+PROFILE_SNAPSHOT_ID = 1
+
+profile_snapshot = Table(
+    "profile_snapshot",
+    ops_metadata,
+    Column("id", SmallInteger, primary_key=True, autoincrement=False),
+    Column("sample_size", Integer, nullable=False),
+    # The validity key: the fact's coverage and the latest load run it was measured against.
+    Column("fact_min_date", Date, nullable=True),
+    Column("fact_max_date", Date, nullable=True),
+    Column("last_run_id", BigInteger, nullable=True),
+    Column("last_run_finished_at", DateTime(timezone=True), nullable=True),
+    Column("profile", JSONB, nullable=False),
+    Column("computed_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(f"id = {PROFILE_SNAPSHOT_ID}", name="ck_profile_snapshot_single_row"),
+    comment=(
+        "The startup data profile, reused while the fact's coverage and the latest "
+        "load run are unchanged. Derived from Gold, so dropping Gold drops it too."
+    ),
+)
+
+ORDERED_OPS_TABLES: tuple[Table, ...] = (load_runs, profile_snapshot)
