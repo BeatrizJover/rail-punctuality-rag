@@ -23,7 +23,7 @@ from rail_rag.db.partitions import existing_partitions
 from rail_rag.observability import Trace, annotate, span, start_trace
 from rail_rag.rag.context import render_context
 from rail_rag.rag.context.profile import DataProfile, load_profile
-from rail_rag.rag.exceptions import AnswerError, UnsafeQueryError
+from rail_rag.rag.exceptions import AnswerError, QueryExecutionError, UnsafeQueryError
 from rail_rag.rag.prompts import (
     NO_SQL,
     Passage,
@@ -164,7 +164,12 @@ class AnswerPipeline:
             self._check_sql(safe)
         with span("execute"):
             annotate(sql=safe.sql)
-            result = execute_safe_query(self._engine, safe, self._policy)
+            try:
+                result = execute_safe_query(self._engine, safe, self._policy)
+            except QueryExecutionError as exc:
+                if exc.timed_out:
+                    annotate(timed_out=True)
+                raise
             annotate(rows=len(result.rows), truncated=result.truncated)
             if result.elapsed_ms >= _NEAR_TIMEOUT_RATIO * self._policy.statement_timeout_ms:
                 annotate(near_timeout=True)

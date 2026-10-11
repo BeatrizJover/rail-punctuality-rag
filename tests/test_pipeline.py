@@ -548,18 +548,23 @@ def test_a_query_under_the_threshold_is_not_flagged(
     assert "near_timeout" not in _span(answer, "execute").attributes
 
 
+def _failing_execute(submitted: list[SafeQuery], *, timed_out: bool) -> Any:
+    def execute(_engine: Engine, query: SafeQuery, _policy: SqlPolicy) -> QueryResult:
+        submitted.append(query)
+        raise QueryExecutionError("Query failed: OperationalError", timed_out=timed_out)
+
+    return execute
+
+
 @pytest.mark.integration
 def test_the_guarded_sql_is_traced_when_execution_fails(
     clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL])
     submitted: list[SafeQuery] = []
-
-    def failing_execute(_engine: Engine, query: SafeQuery, _policy: SqlPolicy) -> QueryResult:
-        submitted.append(query)
-        raise QueryExecutionError("Query failed: OperationalError")
-
-    monkeypatch.setattr("rail_rag.rag.pipeline.execute_safe_query", failing_execute)
+    monkeypatch.setattr(
+        "rail_rag.rag.pipeline.execute_safe_query", _failing_execute(submitted, timed_out=False)
+    )
     with capture_traces() as traces, pytest.raises(QueryExecutionError):
         pipeline.answer(_DATA_Q)
 
@@ -568,6 +573,24 @@ def test_the_guarded_sql_is_traced_when_execution_fails(
     (execute,) = [s for s in trace.spans if s.name == "execute"]
     assert execute.attributes == {"sql": query.sql}
     assert trace.error_span == "execute"
+
+
+@pytest.mark.integration
+def test_a_timed_out_query_is_marked_on_the_execute_span(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL])
+    submitted: list[SafeQuery] = []
+    monkeypatch.setattr(
+        "rail_rag.rag.pipeline.execute_safe_query", _failing_execute(submitted, timed_out=True)
+    )
+    with capture_traces() as traces, pytest.raises(QueryExecutionError) as caught:
+        pipeline.answer(_DATA_Q)
+
+    (trace,) = traces
+    (execute,) = [s for s in trace.spans if s.name == "execute"]
+    assert caught.value.timed_out is True
+    assert execute.attributes == {"sql": submitted[0].sql, "timed_out": True}
 
 
 # --- SQL quality signals: lint findings and plan estimates --------------------

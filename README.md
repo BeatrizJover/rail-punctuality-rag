@@ -154,7 +154,7 @@ This section describes the method; the first measured run is under [Baseline](#b
 Every pipeline construction and every `answer()` call emits one JSON line on the logger `rail_rag.trace`. A trace holds:
 
 - a request id, the kind (`startup` or `answer`), the UTC start time, the final route, the total time, and the error class and failing span if it raised;
-- ordered spans. For an answer: `retrieve`, `route`, `sql_generation`, `guard` (with `rejected`), `sql_repair` (only when a repair happens), `sql_checks`, `execute` (with `rows`, `truncated`, the executed `sql` and `near_timeout` when the query took 80% of the statement timeout), then `narration` or `conceptual_answer`;
+- ordered spans. For an answer: `retrieve`, `route`, `sql_generation`, `guard` (with `rejected`), `sql_repair` (only when a repair happens), `sql_checks`, `execute` (with the executed `sql`, which is recorded before the query runs; `rows` and `truncated` once it returns; `near_timeout` when it completed in 80% of the statement timeout or more; and `timed_out` when the server cancelled it), then `narration` or `conceptual_answer`;
 - per span, the provider calls: kind, model, latency including retries, the number of attempts, and prompt, output, thought and total tokens when the provider reports them;
 - the question as a hash only: a 12-character SHA-256 prefix and the length. The raw question is never stored. The executed SQL is stored, and it can echo values taken from the question.
 
@@ -227,7 +227,7 @@ For the current golden set, the estimate is 26 generation calls on the `sql` lay
 - **Provenance**: the commit and a dirty flag (set when a tracked file differs from the commit; untracked files are ignored), the model and generation settings, the embedding model, and short digests of the SQL system prompt and of the golden set.
 - **Data**: the coverage window, its freshness in days, and the latest successful load.
 - **Startup**: the startup trace, span by span.
-- **Headline metrics**: route accuracy, execution accuracy, hit@4 and MRR, the correct-refusal and no-data rates, guard rejection and repair rates, the lint flag rate, the median partitions scanned out of the total, near-timeout queries, and errors by class. Cases flagged `known_limitation` are excluded from every headline number, and injection cases from route accuracy.
+- **Headline metrics**: route accuracy, execution accuracy, hit@4 and MRR, the correct-refusal and no-data rates, guard rejection and repair rates, the lint flag rate, the median partitions scanned out of the total, queries that completed near the timeout, queries that timed out, and errors by class. Cases flagged `known_limitation` are excluded from every headline number, and injection cases from route accuracy.
 - **System**: latency p50 and p95 per span and end to end, mean tokens per generation call, generation calls, cache hits, retries and the budget used.
 - **Cases**: one row per case with outcome, reason, timings, partitions, lint and cache.
 - **Known limitations** and **routing findings**: the flagged cases with their outcomes, and every case the router sent down the wrong path.

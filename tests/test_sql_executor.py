@@ -99,6 +99,19 @@ def test_server_kills_a_slow_query(seeded: Engine) -> None:
         execute_safe_query(seeded, _unchecked("SELECT pg_sleep(5)"), POLICY)
 
 
+def test_a_statement_timeout_is_flagged_as_timed_out(seeded: Engine) -> None:
+    with pytest.raises(QueryExecutionError) as caught:
+        execute_safe_query(seeded, _unchecked("SELECT pg_sleep(5)"), POLICY)
+    assert caught.value.timed_out is True
+    assert str(caught.value) == "Query failed: OperationalError"
+
+
+def test_a_failure_other_than_a_timeout_is_not_flagged(seeded: Engine) -> None:
+    with pytest.raises(QueryExecutionError) as caught:
+        execute_safe_query(seeded, _unchecked("SELECT * FROM gold.does_not_exist"), POLICY)
+    assert caught.value.timed_out is False
+
+
 def test_timeout_does_not_leak_into_the_next_connection(seeded: Engine) -> None:
     """SET LOCAL dies with the transaction; a pooled connection must come back clean."""
     with pytest.raises(QueryExecutionError):

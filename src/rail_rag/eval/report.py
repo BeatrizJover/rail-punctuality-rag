@@ -187,13 +187,16 @@ def _headline(counted: list[Record], cases: dict[str, Record]) -> Record:
         ),
         "partitions_scanned_median": _median(scanned),
         "partitions_total": max(totals) if totals else None,
-        "near_timeout": sum(
-            1
-            for r in counted
-            if (_span(r, "execute") or {}).get("attributes", {}).get("near_timeout")
-        ),
+        "near_timeout": _executes_with(counted, "near_timeout"),
+        "timed_out": _executes_with(counted, "timed_out"),
         "errors_by_class": dict(errors),
     }
+
+
+def _executes_with(counted: list[Record], attribute: str) -> int:
+    return sum(
+        1 for r in counted if (_span(r, "execute") or {}).get("attributes", {}).get(attribute)
+    )
 
 
 def _stats(values: Sequence[float]) -> Record:
@@ -387,7 +390,8 @@ def _headline_section(h: Record) -> list[str]:
             "Partitions scanned / total (median)",
             "n/a" if scanned is None else f"{scanned:g} / {h['partitions_total']}",
         ),
-        ("Near-timeout queries", h["near_timeout"]),
+        ("Completed near timeout", h["near_timeout"]),
+        ("Timed out", h["timed_out"]),
         ("Errors by class", _attrs(h["errors_by_class"]) or "none"),
     ]
     note = h["excluded_known_limitations"]
