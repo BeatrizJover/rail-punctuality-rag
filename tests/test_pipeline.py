@@ -16,13 +16,14 @@ from typing import Any
 import pytest
 from sqlalchemy import Engine
 
-from rail_rag.observability import Span, start_trace
-from rail_rag.rag.exceptions import AnswerError
+from rail_rag.observability import Span, capture_traces, start_trace
+from rail_rag.rag.exceptions import AnswerError, QueryExecutionError
 from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
 from rail_rag.rag.providers.fake import FakeEmbedder, FakeGenerator
 from rail_rag.rag.router import Route, classify_lexically
 from rail_rag.rag.sql.executor import QueryResult
+from rail_rag.rag.sql.guard import SafeQuery
 from rail_rag.rag.sql.policy import SqlPolicy
 from rail_rag.rag.store.chunking import Chunk
 from rail_rag.rag.store.models import KbSchema
@@ -545,6 +546,28 @@ def test_a_query_under_the_threshold_is_not_flagged(
 
     assert answer.trace is not None
     assert "near_timeout" not in _span(answer, "execute").attributes
+
+
+@pytest.mark.integration
+def test_the_guarded_sql_is_traced_when_execution_fails(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_GOOD_SQL])
+    submitted: list[SafeQuery] = []
+
+    def failing_execute(_engine: Engine, query: SafeQuery, _policy: SqlPolicy) -> QueryResult:
+        submitted.append(query)
+        raise QueryExecutionError("Query failed: OperationalError")
+
+    monkeypatch.setattr("rail_rag.rag.pipeline.execute_safe_query", failing_execute)
+    with capture_traces() as traces, pytest.raises(QueryExecutionError):
+        pipeline.answer(_DATA_Q)
+
+    (query,) = submitted
+    (trace,) = traces
+    (execute,) = [s for s in trace.spans if s.name == "execute"]
+    assert execute.attributes == {"sql": query.sql}
+    assert trace.error_span == "execute"
 
 
 # --- SQL quality signals: lint findings and plan estimates --------------------

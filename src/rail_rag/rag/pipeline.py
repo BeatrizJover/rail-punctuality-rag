@@ -163,8 +163,9 @@ class AnswerPipeline:
         with span("sql_checks"):
             self._check_sql(safe)
         with span("execute"):
+            annotate(sql=safe.sql)
             result = execute_safe_query(self._engine, safe, self._policy)
-            annotate(rows=len(result.rows), truncated=result.truncated, sql=safe.sql)
+            annotate(rows=len(result.rows), truncated=result.truncated)
             if result.elapsed_ms >= _NEAR_TIMEOUT_RATIO * self._policy.statement_timeout_ms:
                 annotate(near_timeout=True)
         sources = _sources_from(internal)

@@ -30,7 +30,7 @@ The v0.1 scope is closed: the system runs end to end locally on three years of r
 | P1-11 | Router: the data marker `count` sends conceptual questions down the data path (for example "What delay threshold makes a train count as punctual?"). Fix after the baseline, so the change is measured | ⏳ |
 | P1-12 | Chore: remove `config/logging_config.yaml`, an unused stub (logging is configured in code) | ⏳ |
 | P1-13 | Golden set review after the baseline: reword the two relation-ranking questions (`ranking_worst_relations_2025`, `ranking_worst_relation_full_period`) to state whether directions are combined; reconsider the multilingual `known_limitation` flag once the `e2e` layer is measured | ⏳ |
-| P1-14 | Trace fidelity: the trace keeps no SQL for a query whose execution fails (the six timed-out baseline queries have none), so the audit trail loses exactly the failures. The `sql` attribute is set on the `execute` span only after the query returns; record the SQL before execution | ⏳ |
+| P1-14 | Trace fidelity: the trace keeps no SQL for a query whose execution fails (the six timed-out baseline queries have none), so the audit trail loses exactly the failures. The `sql` attribute is set on the `execute` span only after the query returns; record the SQL before execution | ✅ |
 | P1-15 | Report accuracy: `near_timeout` counts only queries that completed close to the timeout, at 80% of `statement_timeout` or more (5 in the baseline); queries that hit it are counted only under errors (6), so the label reads as if it covered both. Make the label say "completed near the timeout" or count both. Also, retry attempts from an unrecorded case show only under budget used | ⏳ |
 
 ## P2 — Visible improvements
