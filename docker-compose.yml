@@ -9,7 +9,20 @@ services:
     image: pgvector/pgvector:pg16
     container_name: rail-rag-postgres
     restart: unless-stopped
-    command: ["postgres", "-c", "max_wal_size=4GB"]
+    # Tuned for analytical queries; shm_size exceeds Docker's 64MB /dev/shm for parallel hash joins.
+    command:
+      - postgres
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - jit=off
+      - -c
+      - work_mem=64MB
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=6GB
+    shm_size: 1g
     environment:
       POSTGRES_DB: ${RAIL_RAG_DB_NAME:-rail_rag}
       POSTGRES_USER: ${RAIL_RAG_DB_USER:-rail_rag}
