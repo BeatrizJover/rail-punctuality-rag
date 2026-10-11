@@ -245,3 +245,43 @@ profile_snapshot = Table(
 )
 
 ORDERED_OPS_TABLES: tuple[Table, ...] = (load_runs, profile_snapshot)
+
+
+#: Exact daily rollups of the fact, rebuilt after each load. A separate ``MetaData``
+#: keeps them out of ``ORDERED_TABLES``, and so out of the schema shown to the model,
+#: until they are deliberately exposed.
+rollup_metadata = MetaData(schema=GOLD_SCHEMA)
+
+
+def _rollup_measures() -> list[Column[Any]]:
+    """The additive measures of the fact, summed to the rollup's grain."""
+    return [
+        Column("row_count", BigInteger, nullable=False),
+        Column("stop_events", BigInteger, nullable=False),
+        Column("measured_arrivals", BigInteger, nullable=False),
+        Column("punctual_arrivals", BigInteger, nullable=False),
+    ]
+
+
+agg_station_day = Table(
+    "agg_station_day",
+    rollup_metadata,
+    Column("date_key", Date, primary_key=True),
+    Column("station_key", String(_HASH_LEN), primary_key=True),
+    *_rollup_measures(),
+    Index("ix_agg_station_day_station", "station_key"),
+    comment="fact_stop_event summed per service date and measuring point.",
+)
+
+# The direction lives in dim_relation, and relation_key already encodes it.
+agg_relation_day = Table(
+    "agg_relation_day",
+    rollup_metadata,
+    Column("date_key", Date, primary_key=True),
+    Column("relation_key", String(_HASH_LEN), primary_key=True),
+    *_rollup_measures(),
+    Index("ix_agg_relation_day_relation", "relation_key"),
+    comment="fact_stop_event summed per service date and relation.",
+)
+
+ROLLUP_TABLES: tuple[Table, ...] = (agg_station_day, agg_relation_day)

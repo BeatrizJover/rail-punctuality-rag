@@ -83,7 +83,7 @@ The baseline makes timeouts the main cause of failed data cases, so the post-fix
 | --- | --- | :---: |
 | E2-1 | Cheap startup profile (see P1-3): the profile is stored in `ops.profile_snapshot` and reused while the fact's coverage and the latest load run are unchanged | ✅ |
 | E2-2 | Postgres settings: `jit`, `work_mem`, `shared_buffers` | ✅ |
-| E2-3 | Daily rollups by station and by relation (see P1-4) | 📋 |
+| E2-3 | Daily rollups by station and by relation (see P1-4): the tables `gold.agg_station_day` and `gold.agg_relation_day` and their refresh after `finalize` are done; exposure to the model is pending (E2-4) | 🔧 |
 | E2-4 | SQL rules: prefer the rollups, and always bound `f.date_key` with literal ranges | 📋 |
 | E2-5 | A configurable `thinking_level` for generation, decided by evaluation (thinking tokens dominate call time) | 📋 |
 | E2-6 | Lower `statement_timeout` once queries are fast | 📋 |

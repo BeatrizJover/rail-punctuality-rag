@@ -141,7 +141,7 @@ The guard and the executor have separate test files: `tests/test_sql_guard.py` e
 
 ## Data and Knowledge Base
 
-**Gold mirror.** The loader stages a Parquet export, validates it and promotes it, idempotently. `_manifest/coverage.json` is checked first so a truncated export is never loaded. The fact table is partitioned monthly on `date_key` (36 partitions, 2024-01 to 2026-12), with no `DEFAULT` partition: a row outside the declared window must fail the load. Every load writes to `ops.load_runs` on its own connection. `finalize` derives station activity, asserts referential integrity and adds the read indexes.
+**Gold mirror.** The loader stages a Parquet export, validates it and promotes it, idempotently. `_manifest/coverage.json` is checked first so a truncated export is never loaded. The fact table is partitioned monthly on `date_key` (36 partitions, 2024-01 to 2026-12), with no `DEFAULT` partition: a row outside the declared window must fail the load. Every load writes to `ops.load_runs` on its own connection. `finalize` derives station activity, asserts referential integrity, adds the read indexes and rebuilds the daily rollups `gold.agg_station_day` and `gold.agg_relation_day` (not yet visible to the model).
 
 **Knowledge base.** `rag.kb_chunk` holds the passages with their embeddings (pgvector). The corpus is the internal documents in `docs/knowledge/` plus the glossary from Infrabel's Network Statement. The PDF is accepted only when its download matches the `sha256` declared in `config/sources.yaml`, and is then parsed with `pdfplumber` from the table geometry. The vector width is fixed in the table DDL and verified at startup against the configured embedding model, so a model swap with another dimension fails loudly instead of returning garbage.
 
@@ -448,7 +448,8 @@ A run needs the built knowledge base and pays the full startup cost once. The ru
 | `db-drop` | `manage.py db-drop --yes [--include-ops]` |
 | `load-dims` | `manage.py load-dims --source-dir DIR` |
 | `load-fact` | `manage.py load-fact --source-dir DIR [--date D \| --from A --to B] [--on-violation {fail,skip}]` |
-| `finalize` | `manage.py finalize` — station activity, referential integrity, read indexes |
+| `finalize` | `manage.py finalize` — station activity, referential integrity, read indexes, rollups |
+| `refresh-rollups` | `manage.py refresh-rollups` — rebuild the daily rollups on their own |
 | `docs-fetch` | `manage.py docs-fetch --source ID [--dest-dir DIR] [--bootstrap]` |
 | `docs-parse` | `manage.py docs-parse --source ID [--dest-dir DIR]` |
 | `kb-init` | `manage.py kb-init [--profile P]` |

@@ -16,9 +16,11 @@ from rail_rag.db.models import (
     OPS_SCHEMA,
     ORDERED_OPS_TABLES,
     ORDERED_TABLES,
+    ROLLUP_TABLES,
     metadata,
     ops_metadata,
     profile_snapshot,
+    rollup_metadata,
 )
 from rail_rag.db.partitions import BASELINE_END, BASELINE_START, ensure_partitions
 
@@ -52,6 +54,7 @@ def create_schema(engine: Engine) -> None:
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{GOLD_SCHEMA}"'))
             conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{OPS_SCHEMA}"'))
             metadata.create_all(bind=conn, checkfirst=True)
+            rollup_metadata.create_all(bind=conn, checkfirst=True)
             ops_metadata.create_all(bind=conn, checkfirst=True)
             partitions = ensure_partitions(conn, BASELINE_START, BASELINE_END)
     except SQLAlchemyError as exc:
@@ -110,6 +113,7 @@ def missing_tables(engine: Engine) -> set[str]:
     An empty set means the database is ready for the loader; this is what the
     API's readiness probe will consume in Stage 3C.
     """
-    missing_gold = {table.name for table in ORDERED_TABLES} - existing_tables(engine)
+    expected = {table.name for table in (*ORDERED_TABLES, *ROLLUP_TABLES)}
+    missing_gold = expected - existing_tables(engine)
     missing_ops = {table.name for table in ORDERED_OPS_TABLES} - existing_ops_tables(engine)
     return missing_gold | missing_ops

@@ -8,6 +8,7 @@ Usage (global ``-v`` goes before the subcommand):
  python scripts/manage.py load-fact --source-dir DIR [--date D | --from A --to B]
      [--on-violation {fail,skip}]
  python scripts/manage.py finalize
+ python scripts/manage.py refresh-rollups
  python scripts/manage.py docs-fetch --source ID [--dest-dir DIR] [--bootstrap]
  python scripts/manage.py docs-parse --source ID [--dest-dir DIR]
  python scripts/manage.py kb-init [--profile P]
@@ -41,6 +42,7 @@ from rail_rag.ingestion.derivations import (
     assert_referential_integrity,
     derive_station_activity,
     optimize_fact_for_reads,
+    refresh_rollups,
 )
 from rail_rag.ingestion.docs.canonical import (
     DEFAULT_PARSED_DIR,
@@ -179,6 +181,18 @@ def _cmd_finalize() -> int:
     logger.info("Referential integrity holds.")
     optimize_fact_for_reads(engine)
     logger.info("Fact optimized for reads (lookup indexes + analyze).")
+    _refresh_rollups(engine)
+    return EXIT_OK
+
+
+def _refresh_rollups(engine: Engine) -> None:
+    for table, rows in refresh_rollups(engine).items():
+        logger.info("Rollup %s rebuilt: %d row(s).", table, rows)
+
+
+def _cmd_refresh_rollups() -> int:
+    """Rebuild the daily rollups from the fact."""
+    _refresh_rollups(create_db_engine(get_settings()))
     return EXIT_OK
 
 
@@ -467,7 +481,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="fail",
         help="abort the load, or exclude and count the offending rows",
     )
-    sub.add_parser("finalize", help="derive station activity and assert referential integrity")
+    sub.add_parser(
+        "finalize", help="derive station activity, assert referential integrity, refresh rollups"
+    )
+    sub.add_parser("refresh-rollups", help="rebuild the daily rollups from the fact")
     docs_fetch = sub.add_parser("docs-fetch", help="download a declared external document")
     docs_fetch.add_argument(
         "--source", required=True, help="source_id declared in config/sources.yaml"
@@ -580,6 +597,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "finalize":
             return _cmd_finalize()
+        if args.command == "refresh-rollups":
+            return _cmd_refresh_rollups()
         if args.command == "docs-fetch":
             return _cmd_docs_fetch(args.source, args.dest_dir, bool(args.bootstrap))
         if args.command == "docs-parse":
