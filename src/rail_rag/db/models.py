@@ -165,12 +165,72 @@ stg_fact_stop_event = Table(
 )
 
 
+def _rollup_columns(key_column: str, key_comment: str) -> list[Column[Any]]:
+    return [
+        Column(
+            "date_key", Date, primary_key=True, comment="Service date; same value as the fact's."
+        ),
+        Column(
+            key_column,
+            String(_HASH_LEN),
+            primary_key=True,
+            comment=key_comment,
+        ),
+        Column(
+            "row_count", BigInteger, nullable=False, comment="Number of fact rows, i.e. COUNT(*)."
+        ),
+        Column("stop_events", BigInteger, nullable=False, comment="SUM(stop_events) of the fact."),
+        Column(
+            "measured_arrivals",
+            BigInteger,
+            nullable=False,
+            comment="SUM(measured_arrivals) of the fact.",
+        ),
+        Column(
+            "punctual_arrivals",
+            BigInteger,
+            nullable=False,
+            comment="SUM(punctual_arrivals) of the fact; 0 when none was measured.",
+        ),
+    ]
+
+
+agg_station_day = Table(
+    "agg_station_day",
+    metadata,
+    *_rollup_columns("station_key", "Measuring point, as in the fact."),
+    Index("ix_agg_station_day_station", "station_key"),
+    comment=(
+        "Grain: one measuring point on one service date. Every measure is the exact "
+        "daily sum of fact_stop_event over that grain, so SUM over any set of rows "
+        "equals the same SUM on the fact. Network totals are sums over this table. "
+        "Punctuality rate = SUM(punctual_arrivals) / SUM(measured_arrivals)."
+    ),
+)
+
+# The direction lives in dim_relation, and relation_key already encodes it.
+agg_relation_day = Table(
+    "agg_relation_day",
+    metadata,
+    *_rollup_columns("relation_key", "Relation, direction and operator, as in the fact."),
+    Index("ix_agg_relation_day_relation", "relation_key"),
+    comment=(
+        "Grain: one relation (with its direction and operator) on one service date. "
+        "Every measure is the exact daily sum of fact_stop_event over that grain, so "
+        "SUM over any set of rows equals the same SUM on the fact. "
+        "Punctuality rate = SUM(punctual_arrivals) / SUM(measured_arrivals)."
+    ),
+)
+
+ROLLUP_TABLES: tuple[Table, ...] = (agg_station_day, agg_relation_day)
+
 #: Creation order: dimensions first, so the fact's foreign keys resolve.
 ORDERED_TABLES: tuple[Table, ...] = (
     dim_date,
     dim_station,
     dim_relation,
     fact_stop_event,
+    *ROLLUP_TABLES,
     stg_fact_stop_event,
 )
 
@@ -245,43 +305,3 @@ profile_snapshot = Table(
 )
 
 ORDERED_OPS_TABLES: tuple[Table, ...] = (load_runs, profile_snapshot)
-
-
-#: Exact daily rollups of the fact, rebuilt after each load. A separate ``MetaData``
-#: keeps them out of ``ORDERED_TABLES``, and so out of the schema shown to the model,
-#: until they are deliberately exposed.
-rollup_metadata = MetaData(schema=GOLD_SCHEMA)
-
-
-def _rollup_measures() -> list[Column[Any]]:
-    """The additive measures of the fact, summed to the rollup's grain."""
-    return [
-        Column("row_count", BigInteger, nullable=False),
-        Column("stop_events", BigInteger, nullable=False),
-        Column("measured_arrivals", BigInteger, nullable=False),
-        Column("punctual_arrivals", BigInteger, nullable=False),
-    ]
-
-
-agg_station_day = Table(
-    "agg_station_day",
-    rollup_metadata,
-    Column("date_key", Date, primary_key=True),
-    Column("station_key", String(_HASH_LEN), primary_key=True),
-    *_rollup_measures(),
-    Index("ix_agg_station_day_station", "station_key"),
-    comment="fact_stop_event summed per service date and measuring point.",
-)
-
-# The direction lives in dim_relation, and relation_key already encodes it.
-agg_relation_day = Table(
-    "agg_relation_day",
-    rollup_metadata,
-    Column("date_key", Date, primary_key=True),
-    Column("relation_key", String(_HASH_LEN), primary_key=True),
-    *_rollup_measures(),
-    Index("ix_agg_relation_day_relation", "relation_key"),
-    comment="fact_stop_event summed per service date and relation.",
-)
-
-ROLLUP_TABLES: tuple[Table, ...] = (agg_station_day, agg_relation_day)

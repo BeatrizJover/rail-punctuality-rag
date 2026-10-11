@@ -7,6 +7,7 @@ integration tests that create a schema and execute real SQL.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 from collections.abc import Collection
@@ -14,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from rail_rag.observability import Span, capture_traces, start_trace
 from rail_rag.rag.exceptions import AnswerError, QueryExecutionError
@@ -87,7 +88,14 @@ def test_the_trace_does_not_affect_answer_equality_or_repr() -> None:
 
 
 _ALLOWED = frozenset(
-    {"gold.dim_date", "gold.dim_station", "gold.dim_relation", "gold.fact_stop_event"}
+    {
+        "gold.dim_date",
+        "gold.dim_station",
+        "gold.dim_relation",
+        "gold.fact_stop_event",
+        "gold.agg_station_day",
+        "gold.agg_relation_day",
+    }
 )
 
 
@@ -497,7 +505,13 @@ def test_construction_emits_a_startup_trace_with_profile_and_context(
 
     (record,) = _emitted(caplog)
     assert record["kind"] == "startup"
-    assert [s["name"] for s in record["spans"]] == ["profile", "partitions", "context", "retriever"]
+    assert [s["name"] for s in record["spans"]] == [
+        "profile",
+        "partitions",
+        "rollups",
+        "context",
+        "retriever",
+    ]
     assert record["question_hash"] is None
 
 
@@ -621,6 +635,78 @@ def test_sql_checks_sits_between_the_guard_and_execute(
     assert checks["partitions_total"] == 36
     assert checks["plan_total_cost"] > 0
     assert checks["plan_rows"] >= 1
+
+
+_ROLLUP_SQL = (
+    "```sql\nSELECT SUM(stop_events) AS n FROM gold.agg_station_day"
+    " WHERE date_key >= DATE '2025-03-01' AND date_key < DATE '2025-04-01'\n```"
+)
+
+
+@pytest.mark.integration
+def test_a_rollup_query_records_the_plan_but_no_partition_counts(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(clean_schema, kb_schema, [_ROLLUP_SQL, "ok"], explain_plans=True)
+    checks = _span(pipeline.answer(_DATA_Q), "sql_checks").attributes
+
+    assert checks["lint"] == []
+    assert checks["plan_total_cost"] > 0
+    assert "partitions_scanned" not in checks
+    assert "partitions_total" not in checks
+
+
+@pytest.mark.integration
+def test_a_stale_rollup_stops_the_pipeline_at_startup(
+    clean_schema: Engine, kb_schema: KbSchema, caplog: pytest.LogCaptureFixture
+) -> None:
+    from rail_rag.db.models import dim_date, fact_stop_event
+    from rail_rag.db.rollups import StaleRollupsError
+
+    day = dt.date(2025, 3, 1)
+    with clean_schema.begin() as conn:
+        conn.execute(
+            dim_date.insert(),
+            [
+                {
+                    "date_key": day,
+                    "year": 2025,
+                    "quarter": 1,
+                    "month": 3,
+                    "month_name": "March",
+                    "week_of_year": 9,
+                    "day_of_week": 6,
+                    "day_name": "Saturday",
+                    "is_weekend": True,
+                }
+            ],
+        )
+        conn.execute(
+            text(
+                "INSERT INTO gold.dim_station (station_key) VALUES (repeat('a', 32));"
+                "INSERT INTO gold.dim_relation (relation_key) VALUES (repeat('b', 32))"
+            )
+        )
+        conn.execute(
+            fact_stop_event.insert(),
+            [
+                {
+                    "date_key": day,
+                    "station_key": "a" * 32,
+                    "relation_key": "b" * 32,
+                    "train_no": 1,
+                    "stop_events": 1,
+                    "measured_arrivals": 0,
+                }
+            ],
+        )
+
+    with caplog.at_level(logging.INFO, logger="rail_rag.trace"), pytest.raises(StaleRollupsError):
+        _build(clean_schema, kb_schema, ["unused"])
+
+    (record,) = _emitted(caplog)
+    assert record["error_span"] == "rollups"
+    assert record["spans"][-1]["attributes"]["fresh"] is False
 
 
 @pytest.mark.integration

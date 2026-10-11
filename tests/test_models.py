@@ -10,6 +10,8 @@ from sqlalchemy import Table
 from rail_rag.db.models import (
     GOLD_SCHEMA,
     ORDERED_TABLES,
+    agg_relation_day,
+    agg_station_day,
     dim_relation,
     dim_station,
     fact_stop_event,
@@ -132,3 +134,24 @@ def test_staging_mirrors_the_fact_source_columns() -> None:
     """The loader can promote staging rows into the fact table without column mapping."""
     fact_only = {"loaded_at", "measured_arrivals"}
     assert set(stg_fact_stop_event.c.keys()) == set(fact_stop_event.c.keys()) - fact_only
+
+
+def test_the_daily_rollups_are_exposed_gold_tables_after_the_fact() -> None:
+    order = [table.name for table in ORDERED_TABLES]
+    for name in ("agg_station_day", "agg_relation_day"):
+        assert order.index(name) > order.index("fact_stop_event")
+        assert f"{GOLD_SCHEMA}.{name}" in metadata.tables
+
+
+def test_rollup_comments_state_the_grain_and_that_the_sums_are_exact() -> None:
+    for table in (agg_station_day, agg_relation_day):
+        assert table.comment is not None
+        assert "Grain:" in table.comment
+        assert "exact daily sum of fact_stop_event" in table.comment
+        assert all(column.comment for column in table.c)
+
+
+def test_rollup_measures_are_never_null() -> None:
+    for table in (agg_station_day, agg_relation_day):
+        for name in ("row_count", "stop_events", "measured_arrivals", "punctual_arrivals"):
+            assert not table.c[name].nullable, name

@@ -141,7 +141,7 @@ The guard and the executor have separate test files: `tests/test_sql_guard.py` e
 
 ## Data and Knowledge Base
 
-**Gold mirror.** The loader stages a Parquet export, validates it and promotes it, idempotently. `_manifest/coverage.json` is checked first so a truncated export is never loaded. The fact table is partitioned monthly on `date_key` (36 partitions, 2024-01 to 2026-12), with no `DEFAULT` partition: a row outside the declared window must fail the load. Every load writes to `ops.load_runs` on its own connection. `finalize` derives station activity, asserts referential integrity, adds the read indexes and rebuilds the daily rollups `gold.agg_station_day` and `gold.agg_relation_day` (not yet visible to the model).
+**Gold mirror.** The loader stages a Parquet export, validates it and promotes it, idempotently. `_manifest/coverage.json` is checked first so a truncated export is never loaded. The fact table is partitioned monthly on `date_key` (36 partitions, 2024-01 to 2026-12), with no `DEFAULT` partition: a row outside the declared window must fail the load. Every load writes to `ops.load_runs` on its own connection. `finalize` derives station activity, asserts referential integrity, adds the read indexes and rebuilds the daily rollups `gold.agg_station_day` and `gold.agg_relation_day`, which the SQL generator is told to prefer for rates and counts by station, relation or network.
 
 **Knowledge base.** `rag.kb_chunk` holds the passages with their embeddings (pgvector). The corpus is the internal documents in `docs/knowledge/` plus the glossary from Infrabel's Network Statement. The PDF is accepted only when its download matches the `sha256` declared in `config/sources.yaml`, and is then parsed with `pdfplumber` from the table geometry. The vector width is fixed in the table DDL and verified at startup against the configured embedding model, so a model swap with another dimension fails loudly instead of returning garbage.
 
@@ -158,7 +158,7 @@ Every pipeline construction and every `answer()` call emits one JSON line on the
 - per span, the provider calls: kind, model, latency including retries, the number of attempts, and prompt, output, thought and total tokens when the provider reports them;
 - the question as a hash only: a 12-character SHA-256 prefix and the length. The raw question is never stored. The executed SQL is stored, and it can echo values taken from the question.
 
-The **startup trace** has the spans `profile`, `partitions`, `context` and `retriever`, so the cost of building the pipeline is attributed.
+The **startup trace** has the spans `profile`, `partitions`, `rollups`, `context` and `retriever`, so the cost of building the pipeline is attributed. The `rollups` span compares the last date of each daily rollup with the fact's and records both; a mismatch stops startup with a pointer to `manage.py refresh-rollups`.
 
 `manage.py` and the API (when it builds its own state) configure a rotating file sink at `logs/traces.jsonl` (5 MB, 3 backups, git-ignored). The trace logger does not propagate, so traces never appear in the console. The file is written by a standard rotating handler and is not safe with several writer processes.
 
@@ -505,7 +505,7 @@ Integration tests use `rail_rag_test`, derived from `.env`, or `TEST_DATABASE_UR
 
 - Runs locally only: no deployment and no frontend yet.
 - **The first startup after a load takes 5 to 7 minutes on the full data.** The measured cause is the `profile` span, about 99.98% of construction (402 s in one run): it aggregates the whole fact table. The result is stored in `ops.profile_snapshot` and reused while the fact's coverage and the latest load run are unchanged, so later startups skip the aggregates (the `profile` span records `source=snapshot` or `source=computed`).
-- **Aggregations over a year or more stay slow even with partition pruning.** A year still plans 12 of 36 partitions. Daily rollups by station and by relation are planned.
+- **Aggregations over a year or more stay slow even with partition pruning.** A year still plans 12 of 36 partitions. Daily rollups by station and by relation are in place and the SQL rules prefer them; their effect on the evaluation is not measured yet.
 - **Six baseline queries hit the 60 s statement timeout**, and execution accuracy stands at 46.2% (6/13) (see [Baseline](#baseline)).
 - **The lexical router misroutes at least one conceptual question.** "What delay threshold makes a train count as punctual?" contains "count", a data marker, and goes down the data path. The markers are also English-only.
 - The API does not configure general application logging: only the trace sink is configured at startup, so its `INFO` logs are not shown.
@@ -524,7 +524,7 @@ Full list with effort estimates in [ROADMAP.md](ROADMAP.md).
 | P0 | CI on GitHub Actions | ✅ Done |
 | P0 | Real example outputs in this README | ⏳ Pending |
 | P1 | Fast startup: replace the full-table profile with cheap sources | ⏳ Pending |
-| P1 | Partition-pruned aggregations: daily rollups | ⏳ Pending |
+| P1 | Partition-pruned aggregations: daily rollups | ✅ Done: built and exposed to the model, effect not measured yet |
 | P1 | Minimum-volume rule for ratio rankings | ⏳ Pending |
 | P1 | General application logging in the API; truncated-response detection | ⏳ Pending |
 | P1 | Router: stop the "count" marker misrouting conceptual questions | ⏳ Pending |

@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 #: Enough values to teach the model the spelling conventions, few enough to stay cheap.
 DEFAULT_SAMPLE_SIZE = 12
 
+#: Bump when the measured queries change, so a stored profile is recomputed once.
+PROFILE_FORMAT_VERSION = 2
+
 
 @dataclass(frozen=True)
 class DataProfile:
@@ -186,7 +189,9 @@ def _read_snapshot(engine: Engine, key: _SnapshotKey) -> DataProfile | None:
             row.last_run_id,
             row.last_run_finished_at,
         )
-        return _from_payload(row.profile) if stored == key else None
+        if stored != key or row.profile.get("format_version") != PROFILE_FORMAT_VERSION:
+            return None
+        return _from_payload(row.profile)
     except SQLAlchemyError as exc:
         logger.warning("profile snapshot unreadable: %s", type(exc).__name__)
     except (KeyError, TypeError, ValueError):
@@ -216,6 +221,7 @@ def _write_snapshot(engine: Engine, key: _SnapshotKey, profile: DataProfile) -> 
 
 def _to_payload(profile: DataProfile) -> dict[str, Any]:
     payload = asdict(profile)
+    payload["format_version"] = PROFILE_FORMAT_VERSION
     for name in _DATE_FIELDS:
         value = payload[name]
         payload[name] = None if value is None else value.isoformat()
@@ -223,7 +229,7 @@ def _to_payload(profile: DataProfile) -> dict[str, Any]:
 
 
 def _from_payload(payload: dict[str, Any]) -> DataProfile:
-    fields = dict(payload)
+    fields = {k: v for k, v in payload.items() if k != "format_version"}
     for name in _DATE_FIELDS:
         value = fields[name]
         fields[name] = None if value is None else dt.date.fromisoformat(value)
@@ -262,12 +268,14 @@ def _measure(engine: Engine, *, sample_size: int) -> DataProfile:
                 select(dim_relation.c.operator)
                 .where(dim_relation.c.operator.is_not(None))
                 .distinct()
+                .order_by(dim_relation.c.operator)
                 .limit(sample_size)
             ).scalars()
             relations = conn.execute(
                 select(dim_relation.c.relation)
                 .where(dim_relation.c.relation.is_not(None))
                 .distinct()
+                .order_by(dim_relation.c.relation)
                 .limit(sample_size)
             ).scalars()
             profile = DataProfile(

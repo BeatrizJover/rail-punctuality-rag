@@ -270,10 +270,17 @@ def _case_row(record: Record) -> Record:
         "reason": record["reason"],
         "total_ms": (record.get("trace") or {}).get("total_ms"),
         "execute_ms": (_span(record, "execute") or {}).get("duration_ms"),
-        "partitions": None if scanned is None else f"{scanned}/{total}",
+        "partitions": _partitions(scanned, total, planned="plan_total_cost" in checks),
         "lint": checks.get("lint") or [],
         "cache": "+".join(caches) or None,
     }
+
+
+def _partitions(scanned: Any, total: Any, *, planned: bool) -> str | None:
+    """``n/a`` when the query was planned but read no partitioned table."""
+    if scanned is not None:
+        return f"{scanned}/{total}"
+    return "n/a" if planned else None
 
 
 # --- rendering ------------------------------------------------------------------------

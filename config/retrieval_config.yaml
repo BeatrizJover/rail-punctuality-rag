@@ -9,6 +9,8 @@ sql:
     - gold.dim_station
     - gold.dim_relation
     - gold.fact_stop_event
+    - gold.agg_station_day
+    - gold.agg_relation_day
 
   # Caps the outermost SELECT; a larger limit written by the model is tightened.
   max_rows: 200

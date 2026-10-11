@@ -32,7 +32,8 @@ The v0.1 scope is closed: the system runs end to end locally on three years of r
 | P1-13 | Golden set review after the baseline: reword the two relation-ranking questions (`ranking_worst_relations_2025`, `ranking_worst_relation_full_period`) to state whether directions are combined; reconsider the multilingual `known_limitation` flag once the `e2e` layer is measured | ⏳ |
 | P1-14 | Trace fidelity: the trace keeps no SQL for a query whose execution fails (the six timed-out baseline queries have none), so the audit trail loses exactly the failures. The `sql` attribute is set on the `execute` span only after the query returns; record the SQL before execution | ✅ |
 | P1-15 | Report accuracy: retry attempts from an unrecorded case show only under "Budget used today", because the case's trace is not part of the results file. Surface them in the report | ⏳ |
-| P1-16 | Profile samples: the operator and relation samples come from `SELECT DISTINCT … LIMIT 12` without `ORDER BY`, so a recomputed snapshot may pick different rows and change the prompt. Add a deterministic order together with the next prompt-changing step (E2-3/E2-4) | ⏳ |
+| P1-16 | Profile samples: the operator and relation samples come from `SELECT DISTINCT … LIMIT 12` without `ORDER BY`, so a recomputed snapshot may pick different rows and change the prompt. Add a deterministic order together with the next prompt-changing step (E2-3/E2-4) | ✅ |
+| P1-17 | Rollup freshness: the startup check compares only the latest `date_key` of each rollup with the fact's, so a reload of an earlier day without `refresh-rollups` goes unnoticed. Compare a content signal too, for instance the row count or the latest `load_runs` marker the rollups were built from | ⏳ |
 
 ## P2 — Visible improvements
 
@@ -83,8 +84,8 @@ The baseline makes timeouts the main cause of failed data cases, so the post-fix
 | --- | --- | :---: |
 | E2-1 | Cheap startup profile (see P1-3): the profile is stored in `ops.profile_snapshot` and reused while the fact's coverage and the latest load run are unchanged | ✅ |
 | E2-2 | Postgres settings: `jit`, `work_mem`, `shared_buffers` | ✅ |
-| E2-3 | Daily rollups by station and by relation (see P1-4): the tables `gold.agg_station_day` and `gold.agg_relation_day` and their refresh after `finalize` are done; exposure to the model is pending (E2-4) | 🔧 |
-| E2-4 | SQL rules: prefer the rollups, and always bound `f.date_key` with literal ranges | 📋 |
+| E2-3 | Daily rollups by station and by relation (see P1-4): the tables `gold.agg_station_day` and `gold.agg_relation_day`, their refresh after `finalize` and their exposure to the model | ✅ |
+| E2-4 | SQL rules: prefer the rollups, and always bound `f.date_key` with literal ranges | ✅ |
 | E2-5 | A configurable `thinking_level` for generation, decided by evaluation (thinking tokens dominate call time) | 📋 |
 | E2-6 | Lower `statement_timeout` once queries are fast | 📋 |
 | E2-7 | Post-fix report, compared with the baseline | 📋 |
