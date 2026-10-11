@@ -147,7 +147,7 @@ The guard and the executor have separate test files: `tests/test_sql_guard.py` e
 
 ## Evaluation and Monitoring
 
-This section describes the method. **No accuracy figure has been measured yet**: the baseline is pending (see [Baseline](#baseline)).
+This section describes the method; the first measured run is under [Baseline](#baseline).
 
 ### Tracing
 
@@ -234,7 +234,40 @@ For the current golden set, the estimate is 26 generation calls on the `sql` lay
 
 ### Baseline
 
-Pending. The first full run will be committed under `reports/eval/`, and the performance work in the [roadmap](ROADMAP.md) will be measured against it.
+Run `20261009T075158Z-sql`, started on 2026-10-09 at commit `d20f66b`, layer `sql` (no narration), model `models/gemini-3.6-flash`. It took two sessions: the daily generation budget stopped the first, and the second, on 2026-10-11, completed it (24 of 24 cases). Full report: [`reports/eval/20261009T075158Z-sql.md`](reports/eval/20261009T075158Z-sql.md).
+
+The report says `d20f66b (dirty)` because the untracked `reports/` directory written by the first session made `git status --porcelain` non-empty; no tracked file had changed.
+
+| Metric | Value |
+| --- | --- |
+| Route accuracy (injection excluded) | 95.0% (19/20) |
+| Execution accuracy (data cases) | 46.2% (6/13) |
+| Hit@4 (conceptual) | 100.0% (5/5) |
+| MRR (conceptual) | 1.000 (5 cases) |
+| Correct-refusal rate | 100.0% (2/2) |
+| No-data rate | 50.0% (1/2) |
+| Lint flag rate (of checked queries) | 100.0% (15/15) |
+| Partitions scanned / total (median) | 36 / 36 |
+| Errors by class | `QueryExecutionError`=6 |
+
+Latency in seconds, to one decimal, with no cache hits (0 of 25 generation calls):
+
+| Span | n | p50 | p95 |
+| --- | --- | --- | --- |
+| startup (`profile`) | 1 | 373.7 | – |
+| end to end | 24 | 47.2 | 72.9 |
+| `sql_generation` | 20 | 8.0 | 24.8 |
+| `execute` | 17 | 53.1 | 60.1 |
+
+The mean is 880 thought tokens per generation call (25 calls).
+
+**What it shows**
+
+- No failed data case can be traced to a wrong query. Five hit the 60 s `statement_timeout` before returning, and their SQL was not recorded ([P1-14](ROADMAP.md)); two, the relation rankings, grouped by relation and direction while the reference groups by relation only.
+- `coverage_after_the_data` also hit the timeout, which is why the no-data rate is 1/2.
+- No generated fact query bounded `f.date_key` directly (lint 15/15, 36 of 36 partitions), and the recorded queries that were asked for a period filtered it through `dim_date`. Performance therefore caps the measured accuracy for now; whether the timed-out queries are correct is left to the post-fix run.
+- Routing, retrieval and refusals held. The only misroute is the known `count` marker case, which still retrieved the expected passage.
+- Both multilingual cases passed at this layer. They stay flagged `known_limitation` until the `e2e` layer is measured.
 
 ### Measured so far
 
@@ -472,7 +505,7 @@ Integration tests use `rail_rag_test`, derived from `.env`, or `TEST_DATABASE_UR
 - Runs locally only: no deployment and no frontend yet.
 - **Startup takes 5 to 7 minutes on the full data.** The measured cause is the `profile` span, about 99.98% of construction (402 s in one run): it aggregates the whole fact table. A cheaper source for each figure is planned.
 - **Aggregations over a year or more stay slow even with partition pruning.** A year still plans 12 of 36 partitions. Daily rollups by station and by relation are planned.
-- **The evaluation baseline is not published yet.** The harness is complete, but no accuracy figure exists.
+- **Six baseline queries hit the 60 s statement timeout**, and execution accuracy stands at 46.2% (6/13) (see [Baseline](#baseline)).
 - **The lexical router misroutes at least one conceptual question.** "What delay threshold makes a train count as punctual?" contains "count", a data marker, and goes down the data path. The markers are also English-only.
 - The API does not configure general application logging: only the trace sink is configured at startup, so its `INFO` logs are not shown.
 - The trace file is not safe with several writer processes.
@@ -494,10 +527,10 @@ Full list with effort estimates in [ROADMAP.md](ROADMAP.md).
 | P1 | Minimum-volume rule for ratio rankings | ⏳ Pending |
 | P1 | General application logging in the API; truncated-response detection | ⏳ Pending |
 | P1 | Router: stop the "count" marker misrouting conceptual questions | ⏳ Pending |
-| P2 | Evaluation set with per-route accuracy report | 🔧 In progress: harness done, baseline pending |
+| P2 | Evaluation set with per-route accuracy report | ✅ Done: harness built, baseline published |
 | P2 | Minimal web frontend showing answer, SQL, rows and sources | 📋 Planned |
 | P2 | Application Dockerfile and a hosted demo on free tiers | 📋 Planned |
-| Eval 1 | Tracing, SQL quality signals, golden set, budgeted runner, eval command and report | ✅ Done; baseline report ⏳ |
+| Eval 1 | Tracing, SQL quality signals, golden set, budgeted runner, eval command and report | ✅ Done |
 | Eval 2 | Performance work, measured against the baseline | 📋 Planned |
 | Eval 3 | Numeric grounding, LLM-as-judge, persisted traces, CI regression gate | 💡 Idea |
 

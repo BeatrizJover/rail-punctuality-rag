@@ -1,6 +1,6 @@
 # Roadmap
 
-The v0.1 scope is closed: the system runs end to end locally on three years of real data. This file tracks what comes next. The evaluation and monitoring layer (tracing, SQL quality signals, golden set, runner and report) is built; what remains is publishing a baseline and the performance work it will measure.
+The v0.1 scope is closed: the system runs end to end locally on three years of real data. This file tracks what comes next. The evaluation and monitoring layer (tracing, SQL quality signals, golden set, runner and report) is built and its baseline is published; what remains is the performance work it measures.
 
 **Status:** ✅ Done · 🔧 In progress · ⏳ Pending · 📋 Planned · 💡 Idea
 
@@ -23,19 +23,22 @@ The v0.1 scope is closed: the system runs end to end locally on three years of r
 | P1-4 | **Slow aggregations.** Measured: a filter through `dim_date` gives the planner no predicate on the partition key, so a one-month question plans 36 of 36 monthly partitions against 1 of 36 for the same month as a literal `f.date_key` range (estimated cost about 1.50M against 46.8K). The `fact_without_partition_filter` lint flags it. Pruning alone is not enough for year-level questions: a year still plans 12 of 36 partitions and is only about 2.3× cheaper by estimated cost, so daily rollups by station and by relation are needed | ⏳ |
 | P1-5 | Minimum-volume rule for ratio rankings, next to the punctuality formula in the semantic rules | ⏳ |
 | P1-6 | Detect truncated model responses (`finish_reason`) instead of treating them as format errors | ⏳ |
-| P1-7 | Log the provider's real error message, with a regression test | ⏳ |
+| P1-7 | Log the provider's real error message, with a regression test. The Gemini adapter logs a 503 as "throttled"; 503 is overload, 429 is throttling | ⏳ |
 | P1-8 | Disable the Gemini SDK's automatic function calling on tool-less calls | ⏳ |
 | P1-9 | Measure the similarity floor against out-of-domain questions | ⏳ |
 | P1-10 | Update the SQL and conceptual instructions now that the corpus includes an external source | ⏳ |
 | P1-11 | Router: the data marker `count` sends conceptual questions down the data path (for example "What delay threshold makes a train count as punctual?"). Fix after the baseline, so the change is measured | ⏳ |
 | P1-12 | Chore: remove `config/logging_config.yaml`, an unused stub (logging is configured in code) | ⏳ |
+| P1-13 | Golden set review after the baseline: reword the two relation-ranking questions (`ranking_worst_relations_2025`, `ranking_worst_relation_full_period`) to state whether directions are combined; reconsider the multilingual `known_limitation` flag once the `e2e` layer is measured | ⏳ |
+| P1-14 | Trace fidelity: the trace keeps no SQL for a query whose execution fails (the six timed-out baseline queries have none), so the audit trail loses exactly the failures. The `sql` attribute is set on the `execute` span only after the query returns; record the SQL before execution | ⏳ |
+| P1-15 | Report accuracy: `near_timeout` counts only queries that completed close to the timeout, at 80% of `statement_timeout` or more (5 in the baseline); queries that hit it are counted only under errors (6), so the label reads as if it covered both. Make the label say "completed near the timeout" or count both. Also, retry attempts from an unrecorded case show only under budget used | ⏳ |
 
 ## P2 — Visible improvements
 
 | # | Item | Status |
 | --- | --- | :---: |
 | P2-1 | **Minimal web frontend** over `/ask`: question, answer, route, generated SQL, result table and sources (Streamlit or a static page; decision open) | 📋 |
-| P2-2 | **Evaluation set:** questions with expected answers and a per-route, per-family report, run as a regression check. The golden set (24 cases), the comparison rules, the budgeted runner and the report are done; publishing the baseline is pending (E1-6) | 🔧 |
+| P2-2 | **Evaluation set:** questions with expected answers and a per-route, per-family report, run as a regression check. The golden set (24 cases), the comparison rules, the budgeted runner, the report and the published baseline (E1-6) are done; the CI regression gate is E3-5 | ✅ |
 | P2-3 | Offline demo mode, so the quickstart gives meaningful answers without an API key | 📋 |
 | P2-4 | Application `Dockerfile`; Compose currently runs only PostgreSQL | 📋 |
 | P2-5 | Hosted demo on free tiers (managed Postgres + API) over a reduced data window | 📋 |
@@ -69,9 +72,11 @@ The goal is to make quality and performance measurable, then improve them agains
 | E1-3 | Golden set (24 cases, reviewed ground truth) and result comparison: columns matched by value, precision-aware numeric matching | ✅ |
 | E1-4 | Budgeted runner: rate limit, persisted daily budget, reply cache, resumable results, `narrate=False` | ✅ |
 | E1-5 | `manage.py eval` (`--layer`, `--tag`, `--dry-run`, `--resume`, `--no-cache`) and the markdown/JSON report in `reports/eval/` | ✅ |
-| E1-6 | **Baseline report:** run the golden set (at least two days of budget), commit the report, and record it in the README | ⏳ |
+| E1-6 | **Baseline report:** the golden set run over two sessions (24 of 24 cases), committed as [`reports/eval/20261009T075158Z-sql.md`](reports/eval/20261009T075158Z-sql.md) and recorded in the README | ✅ |
 
 ### Stage 2 — Performance, measured against the baseline
+
+The baseline makes timeouts the main cause of failed data cases, so the post-fix report should be read for accuracy as well as latency.
 
 | # | Item | Status |
 | --- | --- | :---: |
