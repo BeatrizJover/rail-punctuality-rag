@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from rail_rag.eval.cli import (
     EvalBackend,
     EvalOptions,
     GeneratorWrapper,
+    _git_state,
     run_eval,
 )
 from rail_rag.eval.config import EvalConfig
@@ -121,6 +123,47 @@ def test_resume_needs_the_meta_file_even_when_results_exist(tmp_path: Path) -> N
     (config.cache_dir / "runs" / "orphan.jsonl").write_text("{}\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="No run 'orphan' to resume"):
         run_eval(EvalOptions(resume="orphan"), config, _UNTOUCHABLE, now=lambda: _NOW)
+
+
+def _git(repo: Path, *args: str) -> str:
+    identity = ("-c", "user.name=test", "-c", "user.email=test@example.com")
+    return subprocess.run(
+        ["git", *identity, "-c", "commit.gpgsign=false", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    path = tmp_path / "repo"
+    path.mkdir()
+    _git(path, "init")
+    (path / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _git(path, "add", "tracked.txt")
+    _git(path, "commit", "-m", "init")
+    return path
+
+
+def test_a_clean_tree_is_not_dirty(repo: Path) -> None:
+    assert _git_state(repo) == (_git(repo, "rev-parse", "--short", "HEAD"), False)
+
+
+def test_an_untracked_file_does_not_make_the_tree_dirty(repo: Path) -> None:
+    (repo / "reports").mkdir()
+    (repo / "reports" / "run.md").write_text("report\n", encoding="utf-8")
+    assert _git_state(repo)[1] is False
+
+
+def test_a_modified_tracked_file_makes_the_tree_dirty(repo: Path) -> None:
+    (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+    assert _git_state(repo) == (_git(repo, "rev-parse", "--short", "HEAD"), True)
+
+
+def test_a_path_outside_a_git_repository_is_unknown(tmp_path: Path) -> None:
+    assert _git_state(tmp_path) == ("unknown", False)
 
 
 def test_a_tag_that_selects_nothing_is_refused(tmp_path: Path) -> None:
