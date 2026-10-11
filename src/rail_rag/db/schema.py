@@ -18,6 +18,7 @@ from rail_rag.db.models import (
     ORDERED_TABLES,
     metadata,
     ops_metadata,
+    profile_snapshot,
 )
 from rail_rag.db.partitions import BASELINE_END, BASELINE_START, ensure_partitions
 
@@ -67,7 +68,8 @@ def drop_schema(engine: Engine, *, include_ops: bool = False) -> None:
     """Drop every Gold table and the namespace itself.
 
     ``ops`` is preserved unless ``include_ops`` is set: the load history outlives
-    the data it describes, and a reset must not erase the audit trail.
+    the data it describes, and a reset must not erase the audit trail. The one
+    exception is the profile snapshot, which describes Gold and is not history.
 
     Raises:
         DatabaseError: if the DDL cannot be applied.
@@ -76,6 +78,7 @@ def drop_schema(engine: Engine, *, include_ops: bool = False) -> None:
         with engine.begin() as conn:
             metadata.drop_all(bind=conn, checkfirst=True)
             conn.execute(text(f'DROP SCHEMA IF EXISTS "{GOLD_SCHEMA}" CASCADE'))
+            conn.execute(text(f'DROP TABLE IF EXISTS "{OPS_SCHEMA}"."{profile_snapshot.name}"'))
             if include_ops:
                 ops_metadata.drop_all(bind=conn, checkfirst=True)
                 conn.execute(text(f'DROP SCHEMA IF EXISTS "{OPS_SCHEMA}" CASCADE'))

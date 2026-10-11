@@ -503,7 +503,7 @@ Integration tests use `rail_rag_test`, derived from `.env`, or `TEST_DATABASE_UR
 ## Known Limitations
 
 - Runs locally only: no deployment and no frontend yet.
-- **Startup takes 5 to 7 minutes on the full data.** The measured cause is the `profile` span, about 99.98% of construction (402 s in one run): it aggregates the whole fact table. A cheaper source for each figure is planned.
+- **The first startup after a load takes 5 to 7 minutes on the full data.** The measured cause is the `profile` span, about 99.98% of construction (402 s in one run): it aggregates the whole fact table. The result is stored in `ops.profile_snapshot` and reused while the fact's coverage and the latest load run are unchanged, so later startups skip the aggregates (the `profile` span records `source=snapshot` or `source=computed`).
 - **Aggregations over a year or more stay slow even with partition pruning.** A year still plans 12 of 36 partitions. Daily rollups by station and by relation are planned.
 - **Six baseline queries hit the 60 s statement timeout**, and execution accuracy stands at 46.2% (6/13) (see [Baseline](#baseline)).
 - **The lexical router misroutes at least one conceptual question.** "What delay threshold makes a train count as punctual?" contains "count", a data marker, and goes down the data path. The markers are also English-only.

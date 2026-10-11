@@ -8,13 +8,25 @@ gap between them.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
-from rail_rag.db.models import dim_date, dim_relation, dim_station, fact_stop_event
-from rail_rag.rag.context import build_context, load_profile
-from rail_rag.rag.sql.policy import SqlPolicy
+from rail_rag.db.models import (
+    dim_date,
+    dim_relation,
+    dim_station,
+    fact_stop_event,
+    metadata,
+    profile_snapshot,
+)
+from rail_rag.db.run_log import LoadCounts, finish_run, new_run_id, start_run
+from rail_rag.observability import span, start_trace
+from rail_rag.rag.context import DataProfile, build_context, load_profile, render_schema
+from rail_rag.rag.exceptions import UnsafeQueryError
+from rail_rag.rag.sql.guard import validate_sql
+from rail_rag.rag.sql.policy import SqlPolicy, load_retrieval_config
 
 pytestmark = pytest.mark.integration
 
@@ -28,6 +40,8 @@ POLICY = SqlPolicy(
         }
     )
 )
+
+REPO_RETRIEVAL_CONFIG = Path(__file__).resolve().parents[1] / "config" / "retrieval_config.yaml"
 
 STATION_KEY = "a" * 32
 RELATION_KEY = "c" * 32
@@ -162,3 +176,132 @@ def test_build_context_assembles_all_three_parts(narrow_data: Engine) -> None:
     assert "NULLIF(SUM(measured_arrivals), 0)" in context
     assert "DATA COVERAGE" in context
     assert "stg_fact_stop_event" not in context
+
+
+# --- the stored profile: reused while the data is unchanged ------------------
+
+
+def _profiled(engine: Engine, **kwargs: int) -> tuple[DataProfile, object]:
+    """Load a profile the way the pipeline does, and report where it came from."""
+    with start_trace("startup") as trace, span("profile"):
+        profile = load_profile(engine, **kwargs)
+    return profile, trace.spans[0].attributes.get("source")
+
+
+def _add_fact_day(engine: Engine, day: dt.date) -> None:
+    with engine.begin() as conn:
+        conn.execute(dim_date.insert(), [_calendar_row(day)])
+        conn.execute(
+            fact_stop_event.insert(),
+            [
+                {
+                    "date_key": day,
+                    "station_key": STATION_KEY,
+                    "relation_key": RELATION_KEY,
+                    "train_no": 1,
+                    "planned_hour": 8,
+                    "delay_arr_s": 30,
+                    "delay_dep_s": 30,
+                    "dwell_delta_s": 0,
+                    "punctual_arrivals": 1,
+                    "stop_events": 1,
+                    "measured_arrivals": 1,
+                }
+            ],
+        )
+
+
+def test_the_first_profile_is_computed_and_the_second_comes_from_the_snapshot(
+    narrow_data: Engine,
+) -> None:
+    computed, first = _profiled(narrow_data)
+    stored, second = _profiled(narrow_data)
+
+    assert (first, second) == ("computed", "snapshot")
+    assert stored == computed
+
+
+def test_the_rendered_profile_is_identical_on_both_paths(narrow_data: Engine) -> None:
+    computed, _ = _profiled(narrow_data)
+    stored, source = _profiled(narrow_data)
+
+    assert source == "snapshot"
+    assert stored.render() == computed.render()
+    assert build_context(narrow_data, POLICY).endswith(computed.render())
+
+
+def test_a_new_load_run_invalidates_the_snapshot(narrow_data: Engine) -> None:
+    _profiled(narrow_data)
+
+    entry = start_run(narrow_data, run_id=new_run_id(), table_name="dim_date", source_file="x")
+    assert _profiled(narrow_data)[1] == "computed"
+    assert _profiled(narrow_data)[1] == "snapshot"
+
+    finish_run(narrow_data, entry, LoadCounts())
+    assert _profiled(narrow_data)[1] == "computed"
+    assert _profiled(narrow_data)[1] == "snapshot"
+
+
+def test_a_fact_row_outside_the_stored_window_invalidates_the_snapshot(
+    narrow_data: Engine,
+) -> None:
+    _profiled(narrow_data)
+    _add_fact_day(narrow_data, LAST_DAY + dt.timedelta(days=1))
+
+    profile, source = _profiled(narrow_data)
+
+    assert source == "computed"
+    assert profile.fact_max_date == LAST_DAY + dt.timedelta(days=1)
+    assert profile.fact_rows == 7
+
+
+def test_a_different_sample_size_is_not_served_from_the_snapshot(narrow_data: Engine) -> None:
+    _profiled(narrow_data)
+
+    profile, source = _profiled(narrow_data, sample_size=1)
+
+    assert source == "computed"
+    assert len(profile.sample_stations) == 1
+
+
+def test_the_snapshot_is_invisible_to_the_model(narrow_data: Engine) -> None:
+    _profiled(narrow_data)
+    allowed = load_retrieval_config(REPO_RETRIEVAL_CONFIG).sql.allowed_tables
+
+    assert f"{profile_snapshot.schema}.{profile_snapshot.name}" not in metadata.tables
+    assert "profile_snapshot" not in render_schema(POLICY)
+    assert "profile_snapshot" not in build_context(narrow_data, POLICY)
+    assert not any("profile_snapshot" in name or name.startswith("ops.") for name in allowed)
+    with pytest.raises(UnsafeQueryError):
+        validate_sql("SELECT * FROM ops.profile_snapshot", POLICY)
+
+
+def test_an_empty_database_keeps_its_behaviour_on_the_snapshot_path(clean_schema: Engine) -> None:
+    computed, first = _profiled(clean_schema)
+    stored, second = _profiled(clean_schema)
+
+    assert (first, second) == ("computed", "snapshot")
+    assert not stored.has_data
+    assert stored == computed
+    assert stored.render() == computed.render()
+    assert "EMPTY" in stored.render()
+
+
+def test_dropping_gold_drops_the_snapshot(narrow_data: Engine) -> None:
+    from rail_rag.db.schema import create_schema, drop_schema
+
+    _profiled(narrow_data)
+    drop_schema(narrow_data)
+    create_schema(narrow_data)
+
+    assert _profiled(narrow_data)[1] == "computed"
+
+
+def test_a_missing_snapshot_table_falls_back_to_computing(narrow_data: Engine) -> None:
+    with narrow_data.begin() as conn:
+        conn.execute(text(f'DROP TABLE "{profile_snapshot.schema}"."{profile_snapshot.name}"'))
+
+    profile, source = _profiled(narrow_data)
+
+    assert source == "computed"
+    assert profile.fact_rows == 6
