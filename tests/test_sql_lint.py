@@ -134,3 +134,34 @@ def test_each_finding_code_is_reported_once() -> None:
         " UNION ALL SELECT 1 FROM gold.fact_stop_event c"
     )
     assert lint_sql(sql) == _FLAGGED
+
+
+# --- the daily rollups are not partitioned, so there is nothing to prune ---------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        pytest.param(
+            "SELECT SUM(punctual_arrivals) FROM gold.agg_station_day"
+            " WHERE date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'",
+            id="rollup-with-a-range",
+        ),
+        pytest.param("SELECT SUM(stop_events) FROM gold.agg_relation_day", id="rollup-no-range"),
+        pytest.param(
+            "SELECT 1 FROM gold.agg_station_day a JOIN gold.dim_date d ON d.date_key = a.date_key"
+            " WHERE d.year = 2025",
+            id="rollup-filtered-through-dim_date",
+        ),
+    ],
+)
+def test_rollup_queries_are_not_flagged(sql: str) -> None:
+    assert lint_sql(sql) == ()
+
+
+def test_a_fact_query_is_still_flagged_without_a_range_and_accepted_with_one() -> None:
+    unbounded = "SELECT SUM(stop_events) FROM gold.fact_stop_event"
+    bounded = f"{unbounded} WHERE date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'"
+
+    assert lint_sql(unbounded) == _FLAGGED
+    assert lint_sql(bounded) == ()

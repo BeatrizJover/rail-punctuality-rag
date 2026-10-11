@@ -305,3 +305,50 @@ def test_a_missing_snapshot_table_falls_back_to_computing(narrow_data: Engine) -
 
     assert source == "computed"
     assert profile.fact_rows == 6
+
+
+def test_a_snapshot_with_an_older_format_version_is_recomputed_once(narrow_data: Engine) -> None:
+    _profiled(narrow_data)
+    with narrow_data.begin() as conn:
+        conn.execute(text("UPDATE ops.profile_snapshot SET profile = profile - 'format_version'"))
+
+    assert _profiled(narrow_data)[1] == "computed"
+    assert _profiled(narrow_data)[1] == "snapshot"
+
+    with narrow_data.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE ops.profile_snapshot"
+                " SET profile = jsonb_set(profile, '{format_version}', '1')"
+            )
+        )
+    assert _profiled(narrow_data)[1] == "computed"
+
+
+def test_the_current_format_version_is_stored_in_the_snapshot(narrow_data: Engine) -> None:
+    from rail_rag.rag.context.profile import PROFILE_FORMAT_VERSION
+
+    _profiled(narrow_data)
+    with narrow_data.connect() as conn:
+        stored = conn.execute(text("SELECT profile ->> 'format_version' FROM ops.profile_snapshot"))
+        assert stored.scalar_one() == str(PROFILE_FORMAT_VERSION)
+
+
+def test_operator_and_relation_samples_are_alphabetical(narrow_data: Engine) -> None:
+    with narrow_data.begin() as conn:
+        conn.execute(
+            dim_relation.insert(),
+            [
+                {"relation_key": f"{i}" * 32, "relation": relation, "operator": operator}
+                for i, (relation, operator) in enumerate(
+                    [("S 9", "Zeta"), ("IC 20", "Alpha"), ("L 3", "Mu"), ("P 1", "Beta")], start=1
+                )
+            ],
+        )
+
+    profile = load_profile(narrow_data)
+
+    assert list(profile.sample_operators) == sorted(profile.sample_operators)
+    assert list(profile.sample_relations) == sorted(profile.sample_relations)
+    assert profile.sample_operators[:2] == ("Alpha", "Beta")
+    assert profile.sample_relations[:2] == ("IC 01", "IC 20")

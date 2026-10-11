@@ -42,6 +42,25 @@ KEYS AND NAMES
 - ptcar_no is nullable by design: the daily feed does not carry it. Never filter
   on ptcar_no IS NOT NULL, as that silently drops most of the network.
 
+DAILY ROLLUPS
+- agg_station_day (date_key, station_key) and agg_relation_day (date_key, relation_key)
+  hold exact daily sums of fact_stop_event: row_count, stop_events, measured_arrivals
+  and punctual_arrivals. Network totals are sums over agg_station_day.
+- For punctuality rates and for stop_events or measured_arrivals counts, by station,
+  relation or the whole network, at day, month or year level, query a rollup. Join
+  dim_station or dim_relation only for names and labels, and to filter by name.
+- Query fact_stop_event only for what the rollups cannot answer: train-level detail,
+  delays and distinct counts such as COUNT(DISTINCT train_no).
+- Stop events are SUM(stop_events) on a rollup. row_count is the number of fact rows,
+  which COUNT(*) gives on the fact.
+
+PERIODS
+- Always filter a period with a literal half-open range on date_key, on the fact and
+  on the rollups, for example
+  date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'.
+- Use dim_date only to output calendar attributes such as year, month or month_name,
+  never to choose the period.
+
 THE CALENDAR IS NOT THE DATA
 - dim_date is a generated calendar covering many years. fact_stop_event covers
   far less. Never infer the available period from dim_date.

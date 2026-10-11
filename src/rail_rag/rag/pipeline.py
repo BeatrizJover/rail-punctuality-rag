@@ -20,6 +20,7 @@ from sqlalchemy import Engine
 
 from rail_rag.db.models import GOLD_SCHEMA, fact_stop_event
 from rail_rag.db.partitions import existing_partitions
+from rail_rag.db.rollups import assert_rollups_fresh
 from rail_rag.observability import Trace, annotate, span, start_trace
 from rail_rag.rag.context import render_context
 from rail_rag.rag.context.profile import DataProfile, load_profile
@@ -102,6 +103,8 @@ class AnswerPipeline:
             with span("partitions"):
                 self._partitions_total = len(existing_partitions(engine))
                 annotate(count=self._partitions_total)
+            with span("rollups"):
+                assert_rollups_fresh(engine)
             with span("context"):
                 self._system = build_sql_system(render_context(policy, profile))
             with span("retriever"):
@@ -264,12 +267,13 @@ class AnswerPipeline:
         except Exception as exc:
             annotate(plan_error=type(exc).__name__)
             return
-        annotate(
-            plan_total_cost=round(estimate.total_cost, 2),
-            plan_rows=round(estimate.rows),
-            partitions_scanned=estimate.partitions_scanned.get(_FACT_TABLE, 0),
-            partitions_total=self._partitions_total,
-        )
+        annotate(plan_total_cost=round(estimate.total_cost, 2), plan_rows=round(estimate.rows))
+        # A query that never reads the partitioned fact has no partition count to report.
+        if _FACT_TABLE in safe.tables:
+            annotate(
+                partitions_scanned=estimate.partitions_scanned.get(_FACT_TABLE, 0),
+                partitions_total=self._partitions_total,
+            )
 
     def _narrate(
         self,

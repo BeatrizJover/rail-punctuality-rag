@@ -391,3 +391,34 @@ def test_an_empty_fact_table_is_reported_as_such(tmp_path: Path) -> None:
         tmp_path, data={"first": "None", "last": "None", "freshness_days": None}
     ).markdown
     assert "the fact table is empty" in markdown
+
+
+def test_a_rollup_query_reads_as_not_applicable_and_stays_out_of_the_partition_median(
+    tmp_path: Path,
+) -> None:
+    fact = [
+        _span("guard", 1.0, rejected=False),
+        _span(
+            "sql_checks",
+            3.0,
+            lint=[],
+            plan_total_cost=10.0,
+            partitions_scanned=1,
+            partitions_total=36,
+        ),
+        _span("execute", 100.0),
+    ]
+    rollup = [
+        _span("guard", 1.0, rejected=False),
+        _span("sql_checks", 3.0, lint=[], plan_total_cost=2.0, plan_rows=5),
+        _span("execute", 10.0),
+    ]
+    results = [_result("a", 200.0, fact), _result("b", 50.0, rollup)]
+    cases = [_case("a", "data", "q"), _case("b", "data", "q")]
+    rendered = render_report(*_write(tmp_path, results, _meta(case_ids=["a", "b"], cases=cases)))
+
+    rows = {row["id"]: row for row in rendered.data["cases"]}
+    assert (rows["a"]["partitions"], rows["b"]["partitions"]) == ("1/36", "n/a")
+    assert rendered.data["headline"]["partitions_scanned_median"] == 1
+    assert "| n/a |" in rendered.markdown
+    assert "0/36" not in rendered.markdown

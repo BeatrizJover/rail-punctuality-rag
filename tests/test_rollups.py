@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from sqlalchemy import Engine, Table, func, select, text
 
+from rail_rag.core.exceptions import DatabaseError
 from rail_rag.db.models import (
     GOLD_SCHEMA,
     ORDERED_TABLES,
@@ -25,10 +26,13 @@ from rail_rag.db.models import (
     fact_stop_event,
     metadata,
 )
+from rail_rag.db.rollups import StaleRollupsError, assert_rollups_fresh
 from rail_rag.db.schema import existing_tables, missing_tables
 from rail_rag.ingestion.derivations import refresh_rollups
+from rail_rag.observability import span, start_trace
 from rail_rag.rag.context import build_context, render_schema
-from rail_rag.rag.exceptions import UnsafeQueryError
+from rail_rag.rag.context.rules import SEMANTIC_RULES
+from rail_rag.rag.prompts import build_sql_system
 from rail_rag.rag.sql.guard import validate_sql
 from rail_rag.rag.sql.policy import SqlPolicy, load_retrieval_config
 
@@ -226,15 +230,115 @@ def test_db_init_creates_the_rollups(clean_schema: Engine) -> None:
     assert missing_tables(clean_schema) == set()
 
 
-def test_the_rollups_are_invisible_to_the_model(loaded: Engine) -> None:
-    names = {t.name for t in ROLLUP_TABLES}
-    allowed = load_retrieval_config(REPO_RETRIEVAL_CONFIG).sql.allowed_tables
-    rendered = render_schema(POLICY) + build_context(loaded, POLICY)
+def _exposed_policy() -> SqlPolicy:
+    return load_retrieval_config(REPO_RETRIEVAL_CONFIG).sql
 
-    assert not names & {t.name for t in ORDERED_TABLES}
-    assert not any(f"{GOLD_SCHEMA}.{name}" in metadata.tables for name in names)
-    assert not any(name in rendered for name in names)
-    assert not any(name in table for table in allowed for name in names)
-    for name in names:
-        with pytest.raises(UnsafeQueryError):
-            validate_sql(f"SELECT * FROM gold.{name}", POLICY)
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_rollups_are_part_of_the_gold_metadata_after_the_fact() -> None:
+    names = [t.name for t in ORDERED_TABLES]
+    assert {t.name for t in ROLLUP_TABLES} <= set(names)
+    assert all(names.index(t.name) > names.index("fact_stop_event") for t in ROLLUP_TABLES)
+    assert all(f"{GOLD_SCHEMA}.{t.name}" in metadata.tables for t in ROLLUP_TABLES)
+
+
+def test_the_repository_allow_list_names_both_rollups() -> None:
+    allowed = _exposed_policy().allowed_tables
+    assert {"gold.agg_station_day", "gold.agg_relation_day"} <= allowed
+
+
+def test_the_rendered_schema_and_context_include_both_rollups(loaded: Engine) -> None:
+    policy = _exposed_policy()
+    for rendered in (render_schema(policy), build_context(loaded, policy)):
+        assert "TABLE gold.agg_station_day" in rendered
+        assert "TABLE gold.agg_relation_day" in rendered
+        assert "PRIMARY KEY: (date_key, station_key)" in rendered
+        assert "PRIMARY KEY: (date_key, relation_key)" in rendered
+        assert "exact daily sum of fact_stop_event" in _flat(rendered)
+
+
+def test_tables_outside_the_allow_list_stay_hidden(loaded: Engine) -> None:
+    rendered = build_context(loaded, _exposed_policy())
+    assert "stg_fact_stop_event" not in rendered
+    assert "profile_snapshot" not in rendered
+
+
+def test_the_prompt_carries_the_rollup_and_period_rules(loaded: Engine) -> None:
+    system = _flat(build_sql_system(build_context(loaded, _exposed_policy())))
+
+    assert "DAILY ROLLUPS" in system
+    assert "Network totals are sums over agg_station_day" in system
+    assert "Query fact_stop_event only for what the rollups cannot answer" in system
+    assert "date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'" in system
+    assert "Use dim_date only to output calendar attributes" in system
+    assert "Stop events are SUM(stop_events) on a rollup" in system
+    assert "Counting rows is therefore counting stop events" in _flat(SEMANTIC_RULES)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(punctual_arrivals) AS p FROM gold.agg_station_day"
+        " WHERE date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'",
+        "SELECT s.station_name, CAST(SUM(a.punctual_arrivals) AS DOUBLE PRECISION)"
+        " / NULLIF(SUM(a.measured_arrivals), 0) AS rate"
+        " FROM gold.agg_station_day a JOIN gold.dim_station s ON a.station_key = s.station_key"
+        " WHERE a.date_key >= DATE '2025-01-01' AND a.date_key < DATE '2026-01-01'"
+        " GROUP BY s.station_name",
+        "SELECT d.month, SUM(a.stop_events) FROM gold.agg_relation_day a"
+        " JOIN gold.dim_date d ON a.date_key = d.date_key"
+        " WHERE a.date_key >= DATE '2025-01-01' AND a.date_key < DATE '2026-01-01'"
+        " GROUP BY d.month",
+    ],
+)
+def test_the_guard_accepts_rollup_queries(sql: str) -> None:
+    assert validate_sql(sql, _exposed_policy()).tables
+
+
+def _stale(loaded: Engine) -> None:
+    _load(loaded, [DAYS[3]])
+
+
+def test_matching_dates_pass_and_are_recorded_on_the_trace(loaded: Engine) -> None:
+    with start_trace("startup") as trace, span("rollups"):
+        assert_rollups_fresh(loaded)
+
+    assert trace.spans[0].attributes == {
+        "fact_max": DAYS[2].isoformat(),
+        "station_rollup_max": DAYS[2].isoformat(),
+        "relation_rollup_max": DAYS[2].isoformat(),
+        "fresh": True,
+    }
+
+
+def test_a_stale_rollup_raises_an_error_that_names_the_fix(loaded: Engine) -> None:
+    _stale(loaded)
+
+    with start_trace("startup") as trace, span("rollups"), pytest.raises(StaleRollupsError) as e:
+        assert_rollups_fresh(loaded)
+
+    assert "refresh-rollups" in str(e.value)
+    assert DAYS[3].isoformat() in str(e.value)
+    assert trace.spans[0].attributes["fresh"] is False
+
+
+def test_rollups_that_were_never_filled_are_stale(clean_schema: Engine) -> None:
+    _load(clean_schema, DAYS[:1])
+
+    with pytest.raises(StaleRollupsError):
+        assert_rollups_fresh(clean_schema)
+
+
+def test_an_empty_database_passes(clean_schema: Engine) -> None:
+    assert_rollups_fresh(clean_schema)
+
+
+def test_a_missing_rollup_table_is_a_clear_database_error(loaded: Engine) -> None:
+    with loaded.begin() as conn:
+        conn.execute(text(f'DROP TABLE "{GOLD_SCHEMA}"."agg_relation_day"'))
+
+    with pytest.raises(DatabaseError, match="db-init"):
+        assert_rollups_fresh(loaded)
