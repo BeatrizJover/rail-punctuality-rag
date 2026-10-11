@@ -9,13 +9,17 @@ once over the finished load, not row by row on every insert.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from sqlalchemy import Engine, exists, func, select, text
+from sqlalchemy import Engine, exists, func, insert, select, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import Select
 
 from rail_rag.core.exceptions import DatabaseError, RailRagError
 from rail_rag.db.models import (
     GOLD_SCHEMA,
+    agg_relation_day,
+    agg_station_day,
     dim_date,
     dim_relation,
     dim_station,
@@ -141,3 +145,42 @@ def assert_referential_integrity(engine: Engine) -> None:
             f"{orphans} fact row(s) reference a dimension key that does not exist"
         )
     logger.info("referential integrity holds: no orphan fact rows")
+
+
+def _rollup_select(key: str) -> Select[Any]:
+    fact = fact_stop_event.c
+    return select(
+        fact.date_key,
+        fact[key],
+        func.count(),
+        func.sum(fact.stop_events),
+        func.sum(fact.measured_arrivals),
+        # NULL where nothing was measured, which contributes nothing to a sum.
+        func.coalesce(func.sum(fact.punctual_arrivals), 0),
+    ).group_by(fact.date_key, fact[key])
+
+
+def refresh_rollups(engine: Engine) -> dict[str, int]:
+    """Rebuild both daily rollups from the fact in a single transaction.
+
+    Returns the row count of each rollup, by table name. Readers of a rollup wait
+    for the commit, since the rebuild truncates it.
+
+    Raises:
+        DatabaseError: if the rebuild fails; the previous content is then kept.
+    """
+    sources = {agg_station_day: "station_key", agg_relation_day: "relation_key"}
+    counts: dict[str, int] = {}
+    try:
+        with engine.begin() as conn:
+            for table, key in sources.items():
+                conn.execute(text(f'TRUNCATE "{GOLD_SCHEMA}"."{table.name}"'))
+                conn.execute(insert(table).from_select(table.c.keys(), _rollup_select(key)))
+                conn.execute(text(f'ANALYZE "{GOLD_SCHEMA}"."{table.name}"'))
+                counts[table.name] = int(
+                    conn.execute(select(func.count()).select_from(table)).scalar_one()
+                )
+    except SQLAlchemyError as exc:
+        raise DatabaseError(f"Could not refresh the rollups: {type(exc).__name__}") from exc
+    logger.info("refreshed rollups: %s", counts)
+    return counts
