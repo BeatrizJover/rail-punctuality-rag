@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import Engine, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from rail_rag.db.partitions import partition_keys
 from rail_rag.rag.exceptions import QueryExecutionError
@@ -31,6 +31,9 @@ from rail_rag.rag.sql.guard import SafeQuery
 from rail_rag.rag.sql.policy import SqlPolicy
 
 logger = logging.getLogger(__name__)
+
+#: SQLSTATE the server reports when ``statement_timeout`` cancels a query.
+_QUERY_CANCELED = "57014"
 
 
 class QueryResult:
@@ -82,7 +85,9 @@ def execute_safe_query(engine: Engine, query: SafeQuery, policy: SqlPolicy) -> Q
             conn.rollback()
     except SQLAlchemyError as exc:
         # The DSN can appear in the driver's message; only the class name is safe to surface.
-        raise QueryExecutionError(f"Query failed: {type(exc).__name__}") from exc
+        raise QueryExecutionError(
+            f"Query failed: {type(exc).__name__}", timed_out=_is_timeout(exc)
+        ) from exc
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     logger.info("query returned %d rows in %.1f ms", len(rows), elapsed_ms)
@@ -93,6 +98,10 @@ def execute_safe_query(engine: Engine, query: SafeQuery, policy: SqlPolicy) -> Q
         truncated=len(rows) >= query.limit,
         elapsed_ms=elapsed_ms,
     )
+
+
+def _is_timeout(exc: SQLAlchemyError) -> bool:
+    return isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == _QUERY_CANCELED
 
 
 def run_query(engine: Engine, sql: str, policy: SqlPolicy) -> QueryResult:

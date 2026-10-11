@@ -238,6 +238,31 @@ def test_guard_repair_lint_partition_and_timeout_figures(tmp_path: Path) -> None
     assert headline["partitions_scanned_median"] == 18.5
     assert headline["partitions_total"] == 36
     assert headline["near_timeout"] == 1
+    assert headline["timed_out"] == 0
+
+
+def test_timed_out_queries_are_counted_apart_from_near_timeout(tmp_path: Path) -> None:
+    spans = [_span("route"), _span("execute", 60000.0, sql="SELECT 1", timed_out=True)]
+    results = [
+        _result("a", 60100.0, spans, outcome="error", error_class="QueryExecutionError"),
+        _result("b", 10.0, [_span("route"), _span("execute", 5.0, near_timeout=True)]),
+        _result("c", 10.0, [_span("route"), _span("execute", 5.0)]),
+    ]
+    cases = [_case(cid, "data", "q") for cid in "abc"]
+    rendered = render_report(*_write(tmp_path, results, _meta(case_ids=list("abc"), cases=cases)))
+
+    headline = rendered.data["headline"]
+    assert (headline["timed_out"], headline["near_timeout"]) == (1, 1)
+    assert "| Timed out | 1 |" in rendered.markdown
+    assert "| Completed near timeout | 1 |" in rendered.markdown
+
+
+def test_the_timeout_rows_are_labelled_in_the_markdown(tmp_path: Path) -> None:
+    markdown = _render(tmp_path).markdown
+
+    assert "Completed near timeout" in markdown
+    assert "Timed out" in markdown
+    assert "Near-timeout queries" not in markdown
 
 
 def test_errors_are_counted_by_class(tmp_path: Path) -> None:

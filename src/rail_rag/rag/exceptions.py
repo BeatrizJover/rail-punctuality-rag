@@ -27,6 +27,10 @@ class UnsafeQueryError(RagError):
 class QueryExecutionError(RagError):
     """Raised when a validated query fails, times out, or the database is down."""
 
+    def __init__(self, message: str, *, timed_out: bool = False) -> None:
+        super().__init__(message)
+        self.timed_out = timed_out
+
 
 class AnswerError(RagError):
     """Raised when the pipeline cannot produce an answer it is willing to stand behind."""
