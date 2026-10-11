@@ -224,7 +224,7 @@ For the current golden set, the estimate is 26 generation calls on the `sql` lay
 `reports/eval/<run_id>.md` and `.json` are rendered from the run's two files, never from memory, so a report can be regenerated and an interrupted run still has one. It has these sections:
 
 - **Status**: COMPLETE, or INCOMPLETE with the stop reason and the pending cases.
-- **Provenance**: the commit and a dirty flag, the model and generation settings, the embedding model, and short digests of the SQL system prompt and of the golden set.
+- **Provenance**: the commit and a dirty flag (set when a tracked file differs from the commit; untracked files are ignored), the model and generation settings, the embedding model, and short digests of the SQL system prompt and of the golden set.
 - **Data**: the coverage window, its freshness in days, and the latest successful load.
 - **Startup**: the startup trace, span by span.
 - **Headline metrics**: route accuracy, execution accuracy, hit@4 and MRR, the correct-refusal and no-data rates, guard rejection and repair rates, the lint flag rate, the median partitions scanned out of the total, near-timeout queries, and errors by class. Cases flagged `known_limitation` are excluded from every headline number, and injection cases from route accuracy.

@@ -423,14 +423,15 @@ def _latest_load(engine: Engine) -> dict[str, str] | None:
     return None if row is None else {"table": row[0], "finished_at": row[1].isoformat()}
 
 
-def _git_state() -> tuple[str, bool]:
+def _git_state(root: Path = _REPO_ROOT) -> tuple[str, bool]:
     def git(*args: str) -> str:
         return subprocess.run(
-            ["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True, check=True, timeout=10
+            ["git", *args], cwd=root, capture_output=True, text=True, check=True, timeout=10
         ).stdout.strip()
 
     try:
-        return git("rev-parse", "--short", "HEAD"), bool(git("status", "--porcelain"))
+        short = git("rev-parse", "--short", "HEAD")
+        return short, bool(git("status", "--porcelain", "--untracked-files=no"))
     except (OSError, subprocess.SubprocessError):
         return "unknown", False
 
