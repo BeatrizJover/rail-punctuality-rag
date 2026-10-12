@@ -22,6 +22,7 @@ class GeneratorFingerprint:
     model: str
     temperature: float
     max_output_tokens: int
+    thinking_level: str | None = None
 
 
 class CachingGenerator:
@@ -46,7 +47,11 @@ class CachingGenerator:
         return reply
 
     def _key(self, system: str, prompt: str) -> str:
-        payload = json.dumps([asdict(self._fingerprint), system, prompt], sort_keys=True)
+        settings = asdict(self._fingerprint)
+        if settings["thinking_level"] is None:
+            # Left out when unset, so every key made before the setting existed still matches.
+            del settings["thinking_level"]
+        payload = json.dumps([settings, system, prompt], sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()
 
 

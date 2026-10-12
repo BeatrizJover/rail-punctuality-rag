@@ -213,7 +213,7 @@ The target model allows 5 requests per minute and 20 generation requests per day
 
 - **Two layers.** `--layer sql` (the default) stops after execution with no narration, which is enough to judge routing, SQL and retrieval. `--layer e2e` also generates the narration.
 - **A persisted daily budget** of 15 requests, keyed to the provider's quota day (midnight in `America/Los_Angeles`), with calls spaced at 4 per minute. Retry attempts found in each trace are charged to the budget afterwards.
-- **A generation cache** on disk, keyed by the model settings, the system prompt and the prompt. A cache hit costs neither budget nor waiting. `--no-cache` bypasses it, for an honest latency measurement.
+- **A generation cache** on disk, keyed by the model settings (model, temperature, output cap and, when set, the thinking level), the system prompt and the prompt. A cache hit costs neither budget nor waiting. `--no-cache` bypasses it, for an honest latency measurement.
 - **`--dry-run`** prints the selected cases, the estimated number of generation calls, the worst case (the estimate plus one repair per data case), the budget left today and the references still to compute. It makes no API call, builds no pipeline and opens no database connection.
 - **`--resume RUN_ID`** continues a run that stopped when the budget or the provider gave out. Each answered case is appended to `.eval_cache/runs/<run_id>.jsonl` immediately, and the run's layer, tags and startup trace live in a `.meta.json` next to it.
 
@@ -457,9 +457,9 @@ A run needs the built knowledge base and pays the full startup cost once. The ru
 | `kb-build` | `manage.py kb-build [--corpus-dir DIR] [--parsed-dir DIR] [--force] [--profile P]` |
 | `kb-search` | `manage.py kb-search --query TEXT [--top-k N] [--profile P]` |
 | `ask` | `manage.py ask --question TEXT [--show-sql] [--profile P]` |
-| `eval` | `manage.py eval [--layer {sql,e2e}] [--tag TAG ...] [--dry-run] [--resume RUN_ID] [--no-cache] [--profile P]` |
+| `eval` | `manage.py eval [--layer {sql,e2e}] [--tag TAG ...] [--dry-run] [--resume RUN_ID] [--no-cache] [--thinking-level {minimal,low,medium,high}] [--profile P]` |
 
-`eval` flags: `--layer sql` (default) stops after execution, `--layer e2e` also narrates; `--tag` is repeatable and keeps cases carrying any of the given tags; `--dry-run` plans without calling anything; `--resume` continues a run and keeps its layer and tags; `--no-cache` bypasses the generation cache.
+`eval` flags: `--layer sql` (default) stops after execution, `--layer e2e` also narrates; `--tag` is repeatable and keeps cases carrying any of the given tags; `--dry-run` plans without calling anything; `--resume` continues a run and keeps its layer, tags and thinking level (an explicit `--thinking-level` must match the recorded one); `--no-cache` bypasses the generation cache; `--thinking-level` overrides the profile's optional generation `thinking_level` for one run (unset by default, shown in the report), so two settings can be compared from the same committed tree.
 
 Sample generator: `scripts/generate_sample_gold.py --out-dir DIR [--stations N] [--days N]`.
 </details>

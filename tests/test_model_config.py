@@ -8,7 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from rail_rag.core.exceptions import ConfigError
-from rail_rag.rag.providers.config import load_model_config, load_profiles
+from rail_rag.rag.providers.config import (
+    THINKING_LEVELS,
+    load_model_config,
+    load_profiles,
+    with_thinking_level,
+)
 
 #: Resolved from ``__file__``: the autouse settings fixture chdirs into a tmp_path.
 REPO_CONFIG = Path(__file__).resolve().parent.parent / "config" / "model_config.yaml"
@@ -165,3 +170,42 @@ def test_configuration_is_immutable(tmp_path: Path) -> None:
     config = load_model_config(_write(tmp_path, _MINIMAL))
     with pytest.raises(ValidationError):
         config.generation.model = "other"
+
+
+# --- thinking level -------------------------------------------------------------------
+
+
+def test_the_thinking_level_is_unset_by_default_and_in_the_repo_configuration() -> None:
+    assert load_model_config(REPO_CONFIG).generation.thinking_level is None
+    for name in load_profiles(REPO_CONFIG).names:
+        assert load_profiles(REPO_CONFIG).select(name).generation.thinking_level is None
+
+
+def test_a_profile_can_set_the_thinking_level(tmp_path: Path) -> None:
+    body = _MINIMAL.replace("model: some-model", "model: some-model\n      thinking_level: low")
+    assert load_model_config(_write(tmp_path, body)).generation.thinking_level == "low"
+
+
+def test_an_unknown_thinking_level_is_rejected(tmp_path: Path) -> None:
+    body = _MINIMAL.replace("model: some-model", "model: some-model\n      thinking_level: deep")
+    with pytest.raises(ConfigError):
+        load_model_config(_write(tmp_path, body))
+
+
+def test_the_accepted_levels_are_members_of_the_installed_sdk_enum() -> None:
+    types = pytest.importorskip("google.genai.types")
+    members = {member.name for member in types.ThinkingLevel}
+
+    assert {level.upper() for level in THINKING_LEVELS} <= members
+    assert "THINKING_LEVEL_UNSPECIFIED" not in {level.upper() for level in THINKING_LEVELS}
+
+
+def test_overriding_the_level_validates_it_and_leaves_the_rest_alone(tmp_path: Path) -> None:
+    config = load_model_config(_write(tmp_path, _MINIMAL))
+
+    assert with_thinking_level(config, None) is config
+    changed = with_thinking_level(config, "high")
+    assert changed.generation.thinking_level == "high"
+    assert changed.generation.model_copy(update={"thinking_level": None}) == config.generation
+    with pytest.raises(ConfigError, match="deep"):
+        with_thinking_level(config, "deep")

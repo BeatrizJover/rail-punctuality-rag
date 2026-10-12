@@ -76,6 +76,8 @@ class EvalBackend:
     policy: SqlPolicy
     open_engine: Callable[[], Engine]
     build: Callable[[Engine, GeneratorWrapper], Assembly]
+    #: What the dry run reports about the generation settings, since it builds no pipeline.
+    model: ModelConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -107,12 +109,48 @@ def run_eval(
     plan = _plan(options, config, now())
     budget = DailyBudget(config.daily_generation_budget, config.usage_dir, now=now)
     if options.dry_run:
-        _dry_run(plan, config, budget, options, echo)
+        _dry_run(plan, config, budget, options, echo, backend.model)
         return EXIT_OK
     return _execute(plan, options, config, backend, budget, reports_dir, echo, now, limiter)
 
 
 # --- planning -------------------------------------------------------------------------
+
+
+def _load_meta(runs_dir: Path, run_id: str) -> dict[str, Any]:
+    meta_path = runs_dir / f"{run_id}.meta.json"
+    if not meta_path.exists():
+        raise ConfigError(f"No run {run_id!r} to resume under {runs_dir}")
+    meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+    return meta
+
+
+def resolve_thinking_level(
+    options: EvalOptions,
+    config: EvalConfig,
+    *,
+    requested: str | None,
+    configured: str | None,
+    echo: Echo,
+) -> str | None:
+    """The thinking level a run uses; a resumed run keeps the one it was recorded with.
+
+    A run recorded before the setting existed counts as unset.
+
+    Raises:
+        ConfigError: if there is no run to resume, or ``requested`` differs from its level.
+    """
+    if options.resume is None:
+        return requested if requested is not None else configured
+    meta = _load_meta(config.cache_dir / "runs", options.resume)
+    recorded: str | None = (meta.get("provenance") or {}).get("thinking_level")
+    if requested is not None and requested != recorded:
+        raise ConfigError(
+            f"Run {options.resume} was recorded with thinking level {recorded or 'unset'},"
+            f" not {requested}"
+        )
+    echo(f"Resuming {options.resume} with thinking level {recorded or 'unset'}")
+    return recorded
 
 
 def _plan(options: EvalOptions, config: EvalConfig, started: dt.datetime) -> _Plan:
@@ -122,9 +160,7 @@ def _plan(options: EvalOptions, config: EvalConfig, started: dt.datetime) -> _Pl
     if options.resume is not None:
         run_id = options.resume
         results_path, meta_path = runs_dir / f"{run_id}.jsonl", runs_dir / f"{run_id}.meta.json"
-        if not meta_path.exists():
-            raise ConfigError(f"No run {run_id!r} to resume under {runs_dir}")
-        meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta = _load_meta(runs_dir, run_id)
         layer: Layer = meta["layer"]
         tags = tuple(meta["tags"])
         if options.layer not in (None, layer) or (options.tags and options.tags != tags):
@@ -178,7 +214,12 @@ def _pending(plan: _Plan) -> list[GoldenCase]:
 
 
 def _dry_run(
-    plan: _Plan, config: EvalConfig, budget: DailyBudget, options: EvalOptions, echo: Echo
+    plan: _Plan,
+    config: EvalConfig,
+    budget: DailyBudget,
+    options: EvalOptions,
+    echo: Echo,
+    model: ModelConfig | None,
 ) -> None:
     pending = _pending(plan)
     estimate = estimate_calls(pending, plan.narrate)
@@ -194,6 +235,8 @@ def _dry_run(
         f" tags: {', '.join(plan.tags) or 'all'};"
         f" generation cache: {'on' if config.cache and not options.no_cache else 'off'}"
     )
+    if model is not None:
+        echo(f"Thinking level: {model.generation.thinking_level or 'unset'}")
     echo(f"Cases to run: {len(pending)} of {len(plan.cases)} selected ({kinds or 'none'})")
     for case in pending:
         echo(f"  - {case.id} [{_kind(case)}; {', '.join(case.tags)}]")
@@ -268,7 +311,10 @@ def _execute(
         if not use_cache:
             return guarded
         fingerprint = GeneratorFingerprint(
-            model.generation.model, model.generation.temperature, model.generation.max_output_tokens
+            model.generation.model,
+            model.generation.temperature,
+            model.generation.max_output_tokens,
+            model.generation.thinking_level,
         )
         return CachingGenerator(guarded, config.generations_dir, fingerprint)
 
@@ -378,6 +424,7 @@ def _initial_meta(
             "model": model.generation.model,
             "temperature": model.generation.temperature,
             "max_output_tokens": model.generation.max_output_tokens,
+            "thinking_level": model.generation.thinking_level,
             "embedding_model": model.embedding.model,
             "system_prompt_sha": _sha(assembly.system_prompt.encode()),
             "golden_set_sha": _sha(config.golden_set.read_bytes()),

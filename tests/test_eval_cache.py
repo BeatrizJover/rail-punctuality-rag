@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 from pathlib import Path
 
 from rail_rag.eval.budget import BudgetedGenerator, DailyBudget, RateLimiter
@@ -110,3 +112,41 @@ def test_a_corrupt_entry_is_replaced(tmp_path: Path) -> None:
         CachingGenerator(inner, tmp_path, _FINGERPRINT).generate(system="s", prompt="p") == "second"
     )
     assert len(inner.calls) == 1
+
+
+# --- the thinking level joins the key only when it is set ----------------------------
+
+
+def _key_of(directory: Path, fingerprint: GeneratorFingerprint) -> str:
+    CachingGenerator(FakeGenerator(["r"]), directory, fingerprint).generate(system="s", prompt="p")
+    (entry,) = directory.glob("*.json")
+    return entry.stem
+
+
+def test_an_unset_thinking_level_keeps_the_key_the_legacy_payload_gave(tmp_path: Path) -> None:
+    legacy = json.dumps(
+        [{"model": "m", "temperature": 0.0, "max_output_tokens": 1024}, "s", "p"], sort_keys=True
+    )
+
+    assert _key_of(tmp_path, _FINGERPRINT) == hashlib.sha256(legacy.encode()).hexdigest()
+
+
+def test_the_key_matches_one_made_before_the_setting_existed(tmp_path: Path) -> None:
+    """Computed with the pre-change ``cache.py`` for the committed Gemini profile."""
+    fingerprint = GeneratorFingerprint("models/gemini-3.6-flash", 0.0, 4096)
+    CachingGenerator(FakeGenerator(["r"]), tmp_path, fingerprint).generate(
+        system="system text", prompt="prompt text"
+    )
+
+    (entry,) = tmp_path.glob("*.json")
+    assert entry.stem == "93efd344882320cf30b5a58cefaf27394d5be2998dd227e4e9f9694b97713e0d"
+
+
+def test_a_set_thinking_level_changes_the_key(tmp_path: Path) -> None:
+    keys = {
+        _key_of(tmp_path / level, GeneratorFingerprint("m", 0.0, 1024, level))
+        for level in ("low", "high")
+    }
+    keys.add(_key_of(tmp_path / "unset", _FINGERPRINT))
+
+    assert len(keys) == 3

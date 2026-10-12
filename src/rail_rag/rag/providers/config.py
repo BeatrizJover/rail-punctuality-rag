@@ -13,12 +13,16 @@ that was measured. Switching is one line; the profile that was replaced stays.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from rail_rag.core.exceptions import ConfigError
+
+#: Lower-case names of the SDK's ``ThinkingLevel`` members, minus ``THINKING_LEVEL_UNSPECIFIED``.
+ThinkingLevel = Literal["minimal", "low", "medium", "high"]
+THINKING_LEVELS: tuple[str, ...] = get_args(ThinkingLevel)
 
 
 class GenerationConfig(BaseModel):
@@ -31,6 +35,8 @@ class GenerationConfig(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_output_tokens: int = Field(default=1024, gt=0)
     timeout_s: float = Field(default=60.0, gt=0)
+    #: Reasoning effort requested from the provider; unset leaves the model's own default.
+    thinking_level: ThinkingLevel | None = None
 
 
 class EmbeddingConfig(BaseModel):
@@ -80,6 +86,25 @@ class ModelConfig(BaseModel):
     #: Free-tier quotas are per-minute, so a burst of embeddings will hit 429.
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_s: float = Field(default=2.0, gt=0)
+
+
+def with_thinking_level(config: ModelConfig, level: str | None) -> ModelConfig:
+    """Return ``config`` with the generation thinking level set to ``level``; ``None`` clears it.
+
+    Raises:
+        ConfigError: if ``level`` is not one of :data:`THINKING_LEVELS`.
+    """
+    if level == config.generation.thinking_level:
+        return config
+    try:
+        generation = GenerationConfig.model_validate(
+            {**config.generation.model_dump(), "thinking_level": level}
+        )
+    except ValidationError as exc:
+        raise ConfigError(
+            f"Unknown thinking level {level!r}; expected one of {', '.join(THINKING_LEVELS)}"
+        ) from exc
+    return config.model_copy(update={"generation": generation})
 
 
 class ProfileSet(BaseModel):
