@@ -104,13 +104,20 @@ class GeminiGenerator:
     def _http_options(self) -> Any:
         return self._types.HttpOptions(timeout=int(self._config.timeout_s * _MS_PER_S))
 
+    def _request(self, system: str) -> Any:
+        options: dict[str, Any] = {
+            "system_instruction": system,
+            "temperature": self._config.temperature,
+            "max_output_tokens": self._config.max_output_tokens,
+            "http_options": self._http_options(),
+        }
+        if self._config.thinking_level is not None:
+            level = self._types.ThinkingLevel(self._config.thinking_level.upper())
+            options["thinking_config"] = self._types.ThinkingConfig(thinking_level=level)
+        return self._types.GenerateContentConfig(**options)
+
     def generate(self, *, system: str, prompt: str) -> str:
-        request = self._types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=self._config.temperature,
-            max_output_tokens=self._config.max_output_tokens,
-            http_options=self._http_options(),
-        )
+        request = self._request(system)
         response = self._retrying.run(
             "generation",
             lambda: self._client.models.generate_content(

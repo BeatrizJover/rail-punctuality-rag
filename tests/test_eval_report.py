@@ -422,3 +422,14 @@ def test_a_rollup_query_reads_as_not_applicable_and_stays_out_of_the_partition_m
     assert rendered.data["headline"]["partitions_scanned_median"] == 1
     assert "| n/a |" in rendered.markdown
     assert "0/36" not in rendered.markdown
+
+
+def test_provenance_shows_the_thinking_level_or_unset(tmp_path: Path) -> None:
+    unset = _render(tmp_path)
+    assert unset.data["provenance"]["thinking_level"] == "unset"
+    assert "| Thinking level | unset |" in unset.markdown
+
+    provenance = {**_meta()["provenance"], "thinking_level": "low"}
+    low = _render(tmp_path, provenance=provenance)
+    assert low.data["provenance"]["thinking_level"] == "low"
+    assert "| Thinking level | low |" in low.markdown

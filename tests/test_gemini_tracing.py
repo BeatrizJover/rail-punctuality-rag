@@ -164,3 +164,51 @@ def test_each_embedding_call_is_recorded_with_no_tokens(monkeypatch: pytest.Monk
 def test_the_adapter_behaves_as_before_without_a_trace(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_client(monkeypatch, [_response("plain")])
     assert GeminiGenerator(_config(), "key").generate(system="s", prompt="p") == "plain"
+
+
+# --- the request the adapter builds ---------------------------------------------------
+
+
+class _RecordingModels:
+    def __init__(self) -> None:
+        self.configs: list[Any] = []
+
+    def generate_content(self, *, config: Any, **_: Any) -> Any:
+        self.configs.append(config)
+        return _response()
+
+
+def _requests(monkeypatch: pytest.MonkeyPatch, thinking_level: Any) -> list[Any]:
+    models = _RecordingModels()
+    monkeypatch.setattr(
+        gemini_module, "_client", lambda api_key: SimpleNamespace(models=models), raising=True
+    )
+    config = ModelConfig(
+        provider="gemini",
+        generation=GenerationConfig(model="gen-model", thinking_level=thinking_level),
+        embedding=EmbeddingConfig(model="emb-model", dimension=_DIMENSION),
+    )
+    GeminiGenerator(config, "key").generate(system="s", prompt="p")
+    return models.configs
+
+
+def test_no_thinking_config_is_sent_when_the_level_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (request,) = _requests(monkeypatch, None)
+
+    assert request.thinking_config is None
+    assert request.system_instruction == "s"
+    assert (request.temperature, request.max_output_tokens) == (0.0, 1024)
+
+
+@pytest.mark.parametrize("level", ["minimal", "low", "medium", "high"])
+def test_the_configured_level_is_sent_as_the_sdk_enum(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    from google.genai import types
+
+    (request,) = _requests(monkeypatch, level)
+
+    assert request.thinking_config.thinking_level == types.ThinkingLevel(level.upper())
+    assert request.thinking_config.thinking_budget is None

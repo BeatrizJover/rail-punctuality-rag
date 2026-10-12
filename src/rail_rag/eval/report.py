@@ -82,7 +82,11 @@ def _build(results: list[Record], meta: Record) -> Record:
             "recorded": len(results),
             "selected": len(meta.get("case_ids", [])),
         },
-        "provenance": {**meta.get("provenance", {}), "layer": meta.get("layer")}
+        "provenance": {
+            **meta.get("provenance", {}),
+            "layer": meta.get("layer"),
+            "thinking_level": meta.get("provenance", {}).get("thinking_level") or "unset",
+        }
         | {"tags": meta.get("tags", [])},
         "data": meta.get("data", {}),
         "startup": _startup(meta.get("startup_trace")),
@@ -327,6 +331,7 @@ def _provenance_section(provenance: Record) -> list[str]:
         ("Generation model", provenance.get("model")),
         ("Temperature", provenance.get("temperature")),
         ("Max output tokens", provenance.get("max_output_tokens")),
+        ("Thinking level", provenance.get("thinking_level") or "unset"),
         ("Embedding model", provenance.get("embedding_model")),
         ("SQL system prompt (sha256)", provenance.get("system_prompt_sha")),
         ("Golden set (sha256)", provenance.get("golden_set_sha")),

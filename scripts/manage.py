@@ -17,7 +17,7 @@ Usage (global ``-v`` goes before the subcommand):
  python scripts/manage.py kb-search --query TEXT [--top-k N] [--profile P]
  python scripts/manage.py ask --question TEXT [--show-sql] [--profile P]
  python scripts/manage.py eval [--layer {sql,e2e}] [--tag TAG ...] [--dry-run]
-     [--resume RUN_ID] [--no-cache] [--profile P]
+     [--resume RUN_ID] [--no-cache] [--thinking-level {minimal,low,medium,high}] [--profile P]
 """
 
 import argparse
@@ -36,7 +36,14 @@ from rail_rag.core.exceptions import RailRagError
 from rail_rag.core.logging import configure_logging, configure_trace_sink
 from rail_rag.db.engine import create_db_engine
 from rail_rag.db.schema import create_schema, drop_schema, missing_tables, ping
-from rail_rag.eval.cli import Assembly, EvalBackend, EvalOptions, GeneratorWrapper, run_eval
+from rail_rag.eval.cli import (
+    Assembly,
+    EvalBackend,
+    EvalOptions,
+    GeneratorWrapper,
+    resolve_thinking_level,
+    run_eval,
+)
 from rail_rag.eval.config import DEFAULT_EVAL_CONFIG, load_eval_config
 from rail_rag.ingestion.derivations import (
     assert_referential_integrity,
@@ -71,7 +78,12 @@ from rail_rag.ingestion.manifest import (
     read_manifest,
 )
 from rail_rag.rag.pipeline import AnswerPipeline
-from rail_rag.rag.providers.config import ModelConfig, load_model_config
+from rail_rag.rag.providers.config import (
+    THINKING_LEVELS,
+    ModelConfig,
+    load_model_config,
+    with_thinking_level,
+)
 from rail_rag.rag.providers.factory import build_embedder, build_generator
 from rail_rag.rag.sql.policy import RetrievalConfig, load_retrieval_config
 from rail_rag.rag.store.builder import build_knowledge_base
@@ -371,10 +383,23 @@ def _build_pipeline(
     )
 
 
-def _cmd_eval(options: EvalOptions, profile: str | None) -> int:
+def _cmd_eval(options: EvalOptions, profile: str | None, thinking_level: str | None) -> int:
     """Run the golden set (or plan the run) and write the report."""
     settings = get_settings()
     config, kb = _model_setup(profile)
+    eval_config = load_eval_config(DEFAULT_EVAL_CONFIG)
+
+    def echo(line: str) -> None:
+        logger.info("%s", line)
+
+    level = resolve_thinking_level(
+        options,
+        eval_config,
+        requested=thinking_level,
+        configured=config.generation.thinking_level,
+        echo=echo,
+    )
+    config = with_thinking_level(config, level)
     retrieval = load_retrieval_config(Path("config/retrieval_config.yaml"))
 
     def build(engine: Engine, wrap: GeneratorWrapper) -> Assembly:
@@ -382,14 +407,12 @@ def _cmd_eval(options: EvalOptions, profile: str | None) -> int:
         return Assembly(pipeline, config, pipeline.system_prompt)
 
     backend = EvalBackend(
-        policy=retrieval.sql, open_engine=lambda: create_db_engine(settings), build=build
+        policy=retrieval.sql,
+        open_engine=lambda: create_db_engine(settings),
+        build=build,
+        model=config,
     )
-    return run_eval(
-        options,
-        load_eval_config(DEFAULT_EVAL_CONFIG),
-        backend,
-        echo=lambda line: logger.info("%s", line),
-    )
+    return run_eval(options, eval_config, backend, echo=echo)
 
 
 def _cmd_ask(
@@ -574,6 +597,12 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--no-cache", action="store_true", help="bypass the generation cache (honest e2e latency)"
     )
+    evaluate.add_argument(
+        "--thinking-level",
+        choices=THINKING_LEVELS,
+        default=None,
+        help="override the profile's generation thinking level for this run",
+    )
     _add_profile_option(evaluate)
 
     return parser
@@ -614,7 +643,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "ask":
             return _cmd_ask(args.question, bool(args.show_sql), args.profile)
         if args.command == "eval":
-            return _cmd_eval(_eval_options(args), args.profile)
+            return _cmd_eval(_eval_options(args), args.profile, args.thinking_level)
         return _cmd_db_drop(confirmed=bool(args.yes), include_ops=bool(args.include_ops))
     except RailRagError as exc:
         logger.error("%s", exc)

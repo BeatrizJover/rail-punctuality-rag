@@ -11,13 +11,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Engine
 
 from rail_rag.core.exceptions import ConfigError
 from rail_rag.eval.budget import DailyBudget, RateLimiter
+from rail_rag.eval.cache import CachingGenerator, GeneratorFingerprint
 from rail_rag.eval.cases import load_golden_set
 from rail_rag.eval.cli import (
     EXIT_INCOMPLETE,
@@ -27,15 +28,16 @@ from rail_rag.eval.cli import (
     EvalOptions,
     GeneratorWrapper,
     _git_state,
+    resolve_thinking_level,
     run_eval,
 )
 from rail_rag.eval.config import EvalConfig
 from rail_rag.eval.expected import cache_key
 from rail_rag.rag.exceptions import ProviderError
 from rail_rag.rag.pipeline import AnswerPipeline
-from rail_rag.rag.providers.config import load_model_config
+from rail_rag.rag.providers.config import ModelConfig, load_model_config
 from rail_rag.rag.providers.fake import FakeEmbedder
-from rail_rag.rag.sql.policy import SqlPolicy
+from rail_rag.rag.sql.policy import SqlPolicy, load_retrieval_config
 from rail_rag.rag.store.models import KbSchema
 from tests.test_eval_runner import Scripted, _populate_kb, _sql
 
@@ -518,3 +520,322 @@ def test_resuming_with_a_different_layer_is_refused(
 
     with pytest.raises(ConfigError, match="cannot change them on resume"):
         _run(tmp_path, backend, EvalOptions(resume=_RUN_ID, layer="e2e"), config)
+
+
+# --- the thinking level ---------------------------------------------------------------
+
+
+def _fake_model(level: str | None = None) -> ModelConfig:
+    from rail_rag.rag.providers.config import with_thinking_level
+
+    model = load_model_config(_ROOT / "config" / "model_config.yaml", profile="fake")
+    return with_thinking_level(model, level)
+
+
+def test_the_override_flag_is_parsed_and_validated() -> None:
+    parser = manage.build_parser()
+
+    assert parser.parse_args(["eval"]).thinking_level is None
+    assert parser.parse_args(["eval", "--thinking-level", "low"]).thinking_level == "low"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["eval", "--thinking-level", "deep"])
+
+
+@pytest.mark.parametrize(("level", "shown"), [(None, "unset"), ("medium", "medium")])
+def test_the_dry_run_reports_the_thinking_level(
+    tmp_path: Path, level: str | None, shown: str
+) -> None:
+    backend = EvalBackend(
+        policy=SqlPolicy(allowed_tables=_ALLOWED),
+        open_engine=_fail,
+        build=_fail,
+        model=_fake_model(level),
+    )
+    lines: list[str] = []
+    run_eval(
+        EvalOptions(dry_run=True),
+        _config(tmp_path),
+        backend,
+        echo=lines.append,
+        now=lambda: _NOW,
+    )
+
+    assert f"Thinking level: {shown}" in lines
+
+
+def test_the_override_reaches_the_pipeline_builder_and_the_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def run(options: EvalOptions, config: EvalConfig, backend: EvalBackend, **_: Any) -> int:
+        seen["backend"] = backend
+        return EXIT_OK
+
+    def build_pipeline(engine: Any, config: ModelConfig, *rest: Any) -> Any:
+        seen["built_with"] = config
+        return type("P", (), {"system_prompt": "prompt"})()
+
+    monkeypatch.setattr(manage, "get_settings", lambda: object())
+    monkeypatch.setattr(manage, "_model_setup", lambda profile: (_fake_model(), object()))
+    monkeypatch.setattr(
+        manage,
+        "load_retrieval_config",
+        lambda path: load_retrieval_config(_ROOT / "config" / "retrieval_config.yaml"),
+    )
+    monkeypatch.setattr(manage, "load_eval_config", lambda path: object())
+    monkeypatch.setattr(manage, "run_eval", run)
+    monkeypatch.setattr(manage, "_build_pipeline", build_pipeline)
+
+    assert manage._cmd_eval(EvalOptions(dry_run=True), None, "high") == EXIT_OK
+
+    backend = seen["backend"]
+    assert backend.model.generation.thinking_level == "high"
+    backend.build(None, lambda generator, model: generator)
+    assert seen["built_with"].generation.thinking_level == "high"
+
+
+def test_the_pipeline_builder_hands_the_generator_the_overridden_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    given: list[ModelConfig] = []
+    monkeypatch.setattr(manage, "get_settings", lambda: SimpleNamespace(llm_api_key="k"))
+    monkeypatch.setattr(manage, "build_generator", lambda config, key: given.append(config))
+    monkeypatch.setattr(manage, "build_embedder", lambda config, key: None)
+    monkeypatch.setattr(manage, "load_registry", lambda path: SimpleNamespace(names=()))
+    monkeypatch.setattr(manage, "AnswerPipeline", lambda *a, **k: None)
+    retrieval = load_retrieval_config(_ROOT / "config" / "retrieval_config.yaml")
+
+    manage._build_pipeline(cast(Any, None), _fake_model("low"), cast(Any, None), retrieval)
+
+    assert given[0].generation.thinking_level == "low"
+
+
+@pytest.mark.integration
+def test_a_run_records_the_thinking_level_in_its_provenance(
+    clean_schema: Engine, kb_schema: KbSchema, tmp_path: Path, golden: Path
+) -> None:
+    _populate_kb(clean_schema, kb_schema)
+    model = _fake_model("low")
+    generator = Scripted(_REPLIES)
+
+    def build(engine: Engine, wrap: GeneratorWrapper) -> Assembly:
+        pipeline = AnswerPipeline(
+            engine,
+            wrap(generator, model),
+            FakeEmbedder(dimension=kb_schema.dimension, model_name="fake-embedding"),
+            kb_schema,
+            SqlPolicy(allowed_tables=_ALLOWED),
+        )
+        return Assembly(pipeline, model, pipeline.system_prompt)
+
+    backend = EvalBackend(
+        policy=SqlPolicy(allowed_tables=_ALLOWED),
+        open_engine=lambda: clean_schema,
+        build=build,
+        model=model,
+    )
+    _run(tmp_path, backend, EvalOptions(), _config(tmp_path, golden_set=golden))
+
+    meta = json.loads((tmp_path / "cache" / "runs" / f"{_RUN_ID}.meta.json").read_text("utf-8"))
+    report = (tmp_path / "reports" / f"{_RUN_ID}.md").read_text(encoding="utf-8")
+    assert meta["provenance"]["thinking_level"] == "low"
+    assert "| Thinking level | low |" in report
+
+    fingerprint = GeneratorFingerprint(
+        model.generation.model,
+        model.generation.temperature,
+        model.generation.max_output_tokens,
+        "low",
+    )
+    keyed = CachingGenerator(generator, tmp_path, fingerprint)
+    stored = {entry.stem for entry in (tmp_path / "cache" / "generations").glob("*.json")}
+    assert generator.calls
+    assert stored == {keyed._key(system, prompt) for system, prompt in generator.calls}
+
+
+# --- resuming keeps the run's thinking level -------------------------------------------
+
+
+def _recorded_run(tmp_path: Path, provenance: dict[str, Any]) -> EvalConfig:
+    config = _config(tmp_path)
+    runs = config.cache_dir / "runs"
+    runs.mkdir(parents=True)
+    (runs / f"{_RUN_ID}.meta.json").write_text(
+        json.dumps({"layer": "sql", "tags": [], "case_ids": [], "provenance": provenance}),
+        encoding="utf-8",
+    )
+    return config
+
+
+def _resume(
+    tmp_path: Path, provenance: dict[str, Any], *, requested: str | None = None
+) -> tuple[str | None, list[str]]:
+    lines: list[str] = []
+    level = resolve_thinking_level(
+        EvalOptions(resume=_RUN_ID),
+        _recorded_run(tmp_path, provenance),
+        requested=requested,
+        configured="high",
+        echo=lines.append,
+    )
+    return level, lines
+
+
+def test_a_resume_inherits_the_recorded_level_over_the_profile_default(tmp_path: Path) -> None:
+    level, lines = _resume(tmp_path, {"thinking_level": "low"})
+
+    assert level == "low"
+    assert lines == [f"Resuming {_RUN_ID} with thinking level low"]
+
+
+@pytest.mark.parametrize("provenance", [{}, {"thinking_level": None}], ids=["pre-E2-5", "null"])
+def test_a_resume_of_a_run_without_a_level_stays_unset(
+    tmp_path: Path, provenance: dict[str, Any]
+) -> None:
+    level, lines = _resume(tmp_path, provenance)
+
+    assert level is None
+    assert lines == [f"Resuming {_RUN_ID} with thinking level unset"]
+
+
+def test_an_explicit_level_equal_to_the_recorded_one_is_accepted(tmp_path: Path) -> None:
+    assert _resume(tmp_path, {"thinking_level": "low"}, requested="low")[0] == "low"
+
+
+@pytest.mark.parametrize(("recorded", "shown"), [("low", "low"), (None, "unset")])
+def test_a_different_explicit_level_is_refused_naming_both(
+    tmp_path: Path, recorded: str | None, shown: str
+) -> None:
+    with pytest.raises(ConfigError) as caught:
+        _resume(tmp_path, {"thinking_level": recorded}, requested="high")
+
+    assert str(caught.value) == f"Run {_RUN_ID} was recorded with thinking level {shown}, not high"
+
+
+def test_without_resume_the_request_wins_over_the_profile_default(tmp_path: Path) -> None:
+    def resolve(requested: str | None) -> str | None:
+        return resolve_thinking_level(
+            EvalOptions(),
+            _config(tmp_path),
+            requested=requested,
+            configured="medium",
+            echo=lambda line: pytest.fail(line),
+        )
+
+    assert resolve("high") == "high"
+    assert resolve(None) == "medium"
+
+
+def _recording_wrap(seen: dict[str, Any]) -> GeneratorWrapper:
+    """A generator wrapper that notes the config the cache fingerprint is built from."""
+
+    def wrap(generator: Any, model: ModelConfig) -> Any:
+        seen["wrapped_with"] = model
+        return generator
+
+    return wrap
+
+
+def _patch_composition_root(
+    monkeypatch: pytest.MonkeyPatch, eval_config: EvalConfig, profile_level: str | None
+) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fail(*_: Any, **__: Any) -> Any:
+        raise AssertionError("nothing may be built or run before the level is settled")
+
+    def run(options: EvalOptions, config: EvalConfig, backend: EvalBackend, **_: Any) -> int:
+        seen["backend"] = backend
+        return EXIT_OK
+
+    def build_pipeline(engine: Any, config: ModelConfig, kb: Any, retrieval: Any, wrap: Any) -> Any:
+        seen["built_with"] = config
+        wrap(object(), config)
+        return type("P", (), {"system_prompt": "prompt"})()
+
+    monkeypatch.setattr(manage, "get_settings", lambda: object())
+    monkeypatch.setattr(
+        manage, "_model_setup", lambda profile: (_fake_model(profile_level), object())
+    )
+    monkeypatch.setattr(manage, "load_eval_config", lambda path: eval_config)
+    monkeypatch.setattr(
+        manage,
+        "load_retrieval_config",
+        lambda path: load_retrieval_config(_ROOT / "config" / "retrieval_config.yaml"),
+    )
+    monkeypatch.setattr(manage, "run_eval", run)
+    monkeypatch.setattr(manage, "_build_pipeline", build_pipeline)
+    monkeypatch.setattr(manage, "build_generator", fail)
+    monkeypatch.setattr(manage, "create_db_engine", fail)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("provenance", "profile_level", "expected"),
+    [({"thinking_level": "low"}, "high", "low"), ({}, "high", None)],
+    ids=["recorded-level", "pre-E2-5-meta"],
+)
+def test_the_resumed_pipeline_and_provenance_use_the_recorded_level(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provenance: dict[str, Any],
+    profile_level: str,
+    expected: str | None,
+) -> None:
+    seen = _patch_composition_root(monkeypatch, _recorded_run(tmp_path, provenance), profile_level)
+
+    assert manage._cmd_eval(EvalOptions(resume=_RUN_ID), None, None) == EXIT_OK
+
+    backend = seen["backend"]
+    assert backend.model.generation.thinking_level == expected
+    backend.build(None, _recording_wrap(seen))
+    assert seen["built_with"].generation.thinking_level == expected
+    assert seen["wrapped_with"].generation.thinking_level == expected
+
+
+def test_a_mismatch_fails_before_anything_is_built_or_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _patch_composition_root(
+        monkeypatch, _recorded_run(tmp_path, {"thinking_level": "low"}), None
+    )
+
+    with pytest.raises(ConfigError, match="recorded with thinking level low, not high"):
+        manage._cmd_eval(EvalOptions(resume=_RUN_ID), None, "high")
+
+    assert seen == {}
+
+
+def test_a_matching_explicit_level_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen = _patch_composition_root(
+        monkeypatch, _recorded_run(tmp_path, {"thinking_level": "low"}), None
+    )
+
+    assert manage._cmd_eval(EvalOptions(resume=_RUN_ID), None, "low") == EXIT_OK
+    assert seen["backend"].model.generation.thinking_level == "low"
+
+
+def test_a_profile_level_is_kept_when_there_is_no_flag_and_no_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _patch_composition_root(monkeypatch, _config(tmp_path), "low")
+
+    assert manage._cmd_eval(EvalOptions(), None, None) == EXIT_OK
+
+    backend = seen["backend"]
+    assert backend.model.generation.thinking_level == "low"
+    backend.build(None, _recording_wrap(seen))
+    assert seen["built_with"].generation.thinking_level == "low"
+    assert seen["wrapped_with"].generation.thinking_level == "low"
+
+
+def test_an_explicit_flag_still_overrides_the_profile_level(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _patch_composition_root(monkeypatch, _config(tmp_path), "low")
+
+    assert manage._cmd_eval(EvalOptions(), None, "high") == EXIT_OK
+    assert seen["backend"].model.generation.thinking_level == "high"
