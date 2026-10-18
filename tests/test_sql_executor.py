@@ -37,8 +37,8 @@ def seeded(clean_schema: Engine) -> Engine:
         conn.execute(
             dim_station.insert(),
             [
-                {"station_key": "a" * 32, "station_name": "Bruxelles-Midi"},
-                {"station_key": "b" * 32, "station_name": "Gent-Sint-Pieters"},
+                {"station_key": 220, "station_name": "Bruxelles-Midi", "is_passenger": True},
+                {"station_key": 455, "station_name": "Gent-Sint-Pieters", "is_passenger": True},
             ],
         )
     return clean_schema
@@ -74,7 +74,8 @@ def test_server_refuses_a_write_that_bypassed_the_guard(seeded: Engine) -> None:
     the test would pass with the defence removed.
     """
     query = _unchecked(
-        "INSERT INTO gold.dim_station (station_key) VALUES ('c') RETURNING station_key"
+        "INSERT INTO gold.dim_station (station_key, station_name, is_passenger)"
+        " VALUES (7, 'X', true) RETURNING station_key"
     )
     with pytest.raises(QueryExecutionError):
         execute_safe_query(seeded, query, POLICY)
@@ -157,7 +158,8 @@ def test_punctuality_ratio_query_runs_end_to_end(seeded: Engine) -> None:
             [
                 {
                     "date_key": dt.date(2024, 8, 8),
-                    "station_key": "a" * 32,
+                    "station_key": 220,
+                    "stop_point_key": "a" * 32,
                     "relation_key": "c" * 32,
                     "train_no": 100 + i,
                     "planned_hour": 8,

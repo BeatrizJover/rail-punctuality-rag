@@ -8,9 +8,12 @@ therefore contain fact keys with no matching dimension row.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from sqlalchemy import Engine, FromClause, func, select
 
@@ -44,19 +47,20 @@ def test_load_dimensions_inserts_then_updates(
 ) -> None:
     """The second run must update in place, not duplicate or fail on the primary key."""
     first = load_dimensions(clean_schema, synthetic_gold_dir)
-    assert first["dim_station"].rows_inserted == 20
+    assert first["dim_station"].rows_inserted == 21
     assert first["dim_station"].rows_updated == 0
 
     second = load_dimensions(clean_schema, synthetic_gold_dir)
     assert second["dim_station"].rows_inserted == 0
-    assert second["dim_station"].rows_updated == 20
-    assert _count(clean_schema, dim_station) == 20
+    assert second["dim_station"].rows_updated == 21
+    assert _count(clean_schema, dim_station) == 21
 
 
 def test_load_dimensions_covers_all_three(clean_schema: Engine, synthetic_gold_dir: Path) -> None:
     load_dimensions(clean_schema, synthetic_gold_dir)
     assert _count(clean_schema, dim_date) == 3
-    assert _count(clean_schema, dim_station) == 20
+    # 20 stations plus the unresolved row.
+    assert _count(clean_schema, dim_station) == 21
     assert _count(clean_schema, dim_relation) == 7
 
 
@@ -91,6 +95,30 @@ def test_reloading_a_day_is_idempotent(clean_schema: Engine, synthetic_gold_dir:
     assert _count(clean_schema, fact_stop_event) == 60
 
 
+def test_a_reload_follows_a_re_pointed_stop_point(clean_schema: Engine, tmp_path: Path) -> None:
+    """Upstream may move a stop point to another station; the reload must follow, not duplicate."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from generate_sample_gold import generate
+
+    generate(tmp_path, stations=5, days=1)
+    load_dimensions(clean_schema, tmp_path)
+    load_fact(clean_schema, tmp_path)
+
+    fact_path = tmp_path / "fact_stop_event.parquet"
+    table = pq.read_table(fact_path)
+    moved = table.column("stop_point_key")[0].as_py()
+    target = table.column("station_key")[1].as_py()
+    keys = table.column("station_key").to_pylist()
+    keys[0] = target
+    column = table.schema.get_field_index("station_key")
+    pq.write_table(table.set_column(column, "station_key", pa.array(keys, pa.int32())), fact_path)
+    load_fact(clean_schema, tmp_path)
+
+    rows = _fact_rows(clean_schema)
+    assert len(rows) == table.num_rows
+    assert [r["station_key"] for r in rows if r["stop_point_key"] == moved] == [target]
+
+
 def test_reload_refreshes_loaded_at(clean_schema: Engine, synthetic_gold_dir: Path) -> None:
     load_dimensions(clean_schema, synthetic_gold_dir)
     load_fact(clean_schema, synthetic_gold_dir)
@@ -111,9 +139,10 @@ def test_date_filter_loads_only_that_day(clean_schema: Engine, synthetic_gold_di
 
 
 def test_orphans_fail_the_load_by_default(clean_schema: Engine, gold_parquet_dir: Path) -> None:
-    """The real samples are independent cuts, so many fact keys do not resolve."""
+    """The station sample matches the fact sample, but the date and relation samples are
+    independent cuts, so those keys do not resolve."""
     load_dimensions(clean_schema, gold_parquet_dir)
-    with pytest.raises(DataQualityError, match="orphan_station"):
+    with pytest.raises(DataQualityError, match="orphan_date"):
         load_fact(clean_schema, gold_parquet_dir)
     assert _count(clean_schema, fact_stop_event) == 0
 

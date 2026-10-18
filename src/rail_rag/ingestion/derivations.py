@@ -38,14 +38,10 @@ class ReferentialIntegrityError(RailRagError):
 _DERIVE_STATION_ACTIVITY = text(
     f"""
     UPDATE "{GOLD_SCHEMA}".dim_station AS s
-    SET observed_stop_events = COALESCE(f.events, 0),
-        first_seen = f.first_seen,
-        last_seen = f.last_seen
+    SET observed_stop_events = COALESCE(f.events, 0)
     FROM (
         SELECT ds.station_key,
-               SUM(fs.stop_events) AS events,
-               MIN(fs.date_key) AS first_seen,
-               MAX(fs.date_key) AS last_seen
+               SUM(fs.stop_events) AS events
         FROM "{GOLD_SCHEMA}".dim_station AS ds
         LEFT JOIN "{GOLD_SCHEMA}".fact_stop_event AS fs
             ON fs.station_key = ds.station_key
@@ -57,11 +53,12 @@ _DERIVE_STATION_ACTIVITY = text(
 
 
 def derive_station_activity(engine: Engine) -> int:
-    """Fill dim_station's activity columns from the loaded fact.
+    """Fill dim_station's activity column from the loaded fact.
 
     ``observed_stop_events`` becomes the station's SUM of stop_events (0 when the
-    station never appears in the fact); ``first_seen``/``last_seen`` its date span
-    (NULL when absent). Returns the number of dimension rows updated.
+    station never appears in the fact). ``first_seen``/``last_seen`` stay as exported:
+    upstream derives them from the station's aliases, not from this fact window.
+    Returns the number of dimension rows updated.
 
     Raises:
         DatabaseError: if the update fails.

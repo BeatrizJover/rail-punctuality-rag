@@ -32,7 +32,8 @@ from rail_rag.ingestion.validation import (
 pytestmark = pytest.mark.integration
 
 _DATE = dt.date(2026, 8, 23)
-_STATION = "a" + "0" * 31
+_STATION = 455
+_STOP_POINT = "a" + "0" * 31
 _RELATION = "b" + "0" * 31
 
 
@@ -51,7 +52,11 @@ def _seed_dimensions(engine: Engine) -> None:
                 is_weekend=True,
             )
         )
-        conn.execute(dim_station.insert().values(station_key=_STATION, station_name="MOENSBERG"))
+        conn.execute(
+            dim_station.insert().values(
+                station_key=_STATION, station_name="MOENSBERG", is_passenger=True
+            )
+        )
         conn.execute(dim_relation.insert().values(relation_key=_RELATION, relation="IC 01"))
 
 
@@ -59,6 +64,7 @@ def _staged_row(**overrides: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "date_key": _DATE,
         "station_key": _STATION,
+        "stop_point_key": _STOP_POINT,
         "relation_key": _RELATION,
         "train_no": 501,
         "planned_hour": 7,
@@ -113,9 +119,23 @@ def test_duplicate_grain_flags_every_member_of_the_group(clean_schema: Engine) -
     assert _valid_count(clean_schema) == 0
 
 
+def test_null_stop_point_key_is_caught(clean_schema: Engine) -> None:
+    _seed_dimensions(clean_schema)
+    _stage(clean_schema, _staged_row(stop_point_key=None))
+    assert _violations(clean_schema)[RULE_NULL_KEYS] == 1
+
+
+def test_two_stop_points_of_one_station_are_not_a_duplicate(clean_schema: Engine) -> None:
+    """The grain is the stop point, so a shared PTCAR_NO on one train is valid."""
+    _seed_dimensions(clean_schema)
+    _stage(clean_schema, _staged_row(), _staged_row(stop_point_key="d" + "0" * 31))
+    assert RULE_DUPLICATE_GRAIN not in _violations(clean_schema)
+    assert _valid_count(clean_schema) == 2
+
+
 def test_orphan_station_is_caught(clean_schema: Engine) -> None:
     _seed_dimensions(clean_schema)
-    _stage(clean_schema, _staged_row(station_key="c" + "0" * 31))
+    _stage(clean_schema, _staged_row(station_key=999))
     assert _violations(clean_schema)[RULE_ORPHAN_STATION] == 1
 
 
@@ -134,7 +154,7 @@ def test_orphan_date_is_caught(clean_schema: Engine) -> None:
 
 def test_a_row_can_fail_several_rules_at_once(clean_schema: Engine) -> None:
     _seed_dimensions(clean_schema)
-    _stage(clean_schema, _staged_row(station_key="c" + "0" * 31, date_key=dt.date(2030, 1, 1)))
+    _stage(clean_schema, _staged_row(station_key=999, date_key=dt.date(2030, 1, 1)))
     failed = _violations(clean_schema)
     assert failed[RULE_ORPHAN_STATION] == 1
     assert failed[RULE_ORPHAN_DATE] == 1
@@ -143,7 +163,7 @@ def test_a_row_can_fail_several_rules_at_once(clean_schema: Engine) -> None:
 def test_sample_is_bounded(clean_schema: Engine) -> None:
     """A 20M-row failure must not build a 20M-row error message."""
     _seed_dimensions(clean_schema)
-    orphan = "c" + "0" * 31
+    orphan = 999
     _stage(clean_schema, *[_staged_row(station_key=orphan, train_no=n) for n in range(20)])
     with clean_schema.connect() as conn:
         violations = {v.rule: v for v in validate_staged_fact(conn)}

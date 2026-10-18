@@ -27,9 +27,9 @@ from rail_rag.db.models import (
 SAMPLE_SIZE = 5
 
 #: The natural key of the fact, and the conflict target of the promotion upsert.
-GRAIN_COLUMNS = ("date_key", "station_key", "train_no")
+GRAIN_COLUMNS = ("date_key", "stop_point_key", "train_no")
 
-_KEY_COLUMNS = ("date_key", "station_key", "relation_key", "train_no")
+_KEY_COLUMNS = ("date_key", "station_key", "stop_point_key", "relation_key", "train_no")
 
 RULE_NULL_KEYS = "null_keys"
 RULE_DUPLICATE_GRAIN = "duplicate_grain"

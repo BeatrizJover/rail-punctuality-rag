@@ -58,6 +58,7 @@ class DateRange:
 _EXPECTED_COLUMNS: tuple[str, ...] = (
     "date_key",
     "station_key",
+    "stop_point_key",
     "relation_key",
     "train_no",
     "planned_hour",

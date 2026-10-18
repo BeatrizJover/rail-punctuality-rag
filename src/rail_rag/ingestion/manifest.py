@@ -12,13 +12,23 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from rail_rag.db.run_log import LoadCounts
 from rail_rag.ingestion.gold_source import IngestionError
 
 #: Relative path to the coverage manifest.
 MANIFEST_PATH = Path("_manifest") / "coverage.json"
+
+#: The only Gold contract version this loader understands.
+CONTRACT_VERSION = 2
 
 
 class _ManifestModel(BaseModel):
@@ -60,16 +70,28 @@ class FactCoverage(_ManifestModel):
 class CoverageManifest(_ManifestModel):
     """Schema representing complete export coverage manifest."""
 
+    contract_version: int
     exported_at: dt.datetime
     requested_range: RequestedRange
     fact_stop_event: FactCoverage
     dimensions: dict[str, int]
     layout: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("contract_version")
+    @classmethod
+    def _check_contract_version(cls, value: int) -> int:
+        if value != CONTRACT_VERSION:
+            raise ValueError(
+                f"contract_version {value} is not supported; this loader reads "
+                f"version {CONTRACT_VERSION}"
+            )
+        return value
+
     def describe(self) -> str:
         """Returns single-line summary of manifest metrics for logging."""
         fact = self.fact_stop_event
         return (
+            f"contract v{self.contract_version}, "
             f"exported {self.exported_at.isoformat()}, "
             f"fact {fact.min_date_key}..{fact.max_date_key} "
             f"({fact.total_rows:,} rows), "

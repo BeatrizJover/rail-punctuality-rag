@@ -109,12 +109,12 @@ def clean_schema(postgres_engine: Engine) -> Iterator[Engine]:
 
 @pytest.fixture(scope="session")
 def gold_parquet_dir() -> Path:
-    """Directory of the four real Gold samples, converted from CSV to Parquet.
+    """Directory of the four real Gold samples.
 
-    These are a faithful mirror of Betty's manual extraction: same 100 rows, same
-    nulls, native Parquet types. They are three independent cuts, so fact keys may
-    not resolve against the dimensions here - use the synthetic generator for a
-    referentially coherent set.
+    ``fact_stop_event`` and ``dim_station`` are the contract v2 fixtures the export
+    publishes under ``_fixtures/``: every fact station resolves. ``dim_date`` and
+    ``dim_relation`` are older 100-row cuts, so fact dates and relations may not
+    resolve against them - use the synthetic generator for a referentially coherent set.
     """
     return Path(__file__).resolve().parent / "fixtures" / "gold_parquet"
 

@@ -44,8 +44,9 @@ def test_reads_real_relation_with_null_direction(gold_parquet_dir: Path) -> None
 
 def test_reads_real_station(gold_parquet_dir: Path) -> None:
     rows = list(read_dim_station(gold_parquet_dir / "dim_station.parquet"))
-    assert len(rows) == 100
-    assert all(len(r.station_key) == 32 for r in rows)
+    assert len(rows) == 101
+    assert [r.station_name for r in rows if r.station_key == -1] == ["Unresolved"]
+    assert all(r.ptcar_no == r.station_key for r in rows if r.station_key != -1)
 
 
 def test_returns_a_lazy_iterator(gold_parquet_dir: Path) -> None:
@@ -72,12 +73,12 @@ def test_contract_violation_names_the_row(tmp_path: Path) -> None:
     """A bad row must fail with its position and field, not a bare pydantic trace."""
     table = pa.table(
         {
-            "station_key": ["0" * 32, "tooshort"],
+            "station_key": [455, -2],
             "station_name": ["A", "B"],
-            "ptcar_no": [1, 2],
-            "observed_stop_events": [10, 20],
-            "first_seen": [dt.date(2026, 8, 1), dt.date(2026, 8, 1)],
-            "last_seen": [dt.date(2026, 8, 2), dt.date(2026, 8, 2)],
+            "ptcar_no": [455, None],
+            "first_seen": [dt.date(2026, 8, 1), None],
+            "last_seen": [dt.date(2026, 8, 2), None],
+            "is_passenger": [True, False],
         }
     )
     path = tmp_path / "dim_station.parquet"

@@ -28,14 +28,15 @@ INSERT INTO {GOLD_SCHEMA}.dim_date
   (date_key, year, quarter, month, month_name, week_of_year,
    day_of_week, day_name, is_weekend)
 VALUES ('2026-08-23', 2026, 3, 8, 'August', 34, 7, 'Sunday', true);
-INSERT INTO {GOLD_SCHEMA}.dim_station (station_key) VALUES (repeat('a', 32));
+INSERT INTO {GOLD_SCHEMA}.dim_station (station_key, station_name, is_passenger)
+VALUES (455, 'GENT-SINT-PIETERS', true);
 INSERT INTO {GOLD_SCHEMA}.dim_relation (relation_key) VALUES (repeat('b', 32));
 """
 
 _INSERT_FACT = f"""
 INSERT INTO {GOLD_SCHEMA}.fact_stop_event
-  (date_key, station_key, relation_key, train_no, stop_events, measured_arrivals)
-VALUES (:date_key, :station_key, repeat('b', 32), :train_no, 1, 0)
+  (date_key, station_key, stop_point_key, relation_key, train_no, stop_events, measured_arrivals)
+VALUES (:date_key, :station_key, repeat('a', 32), repeat('b', 32), :train_no, 1, 0)
 """
 
 
@@ -162,7 +163,7 @@ def test_a_date_outside_every_partition_is_rejected(clean_schema: Engine) -> Non
     with pytest.raises(IntegrityError, match="no partition"), clean_schema.begin() as conn:
         conn.execute(
             text(_INSERT_FACT),
-            {"date_key": dt.date(2030, 1, 1), "station_key": "a" * 32, "train_no": 1},
+            {"date_key": dt.date(2030, 1, 1), "station_key": 455, "train_no": 1},
         )
 
 
@@ -174,7 +175,7 @@ def test_foreign_keys_still_bite_from_inside_a_child(clean_schema: Engine) -> No
     with pytest.raises(IntegrityError, match="fk_fact_station"), clean_schema.begin() as conn:
         conn.execute(
             text(_INSERT_FACT),
-            {"date_key": dt.date(2026, 8, 23), "station_key": "c" * 32, "train_no": 1},
+            {"date_key": dt.date(2026, 8, 23), "station_key": 999, "train_no": 1},
         )
 
 
@@ -184,7 +185,7 @@ def test_a_row_lands_in_the_child_for_its_month(clean_schema: Engine) -> None:
         conn.execute(text(_DIM_ROWS))
         conn.execute(
             text(_INSERT_FACT),
-            {"date_key": dt.date(2026, 8, 23), "station_key": "a" * 32, "train_no": 1},
+            {"date_key": dt.date(2026, 8, 23), "station_key": 455, "train_no": 1},
         )
     with clean_schema.connect() as conn:
         rows = conn.execute(

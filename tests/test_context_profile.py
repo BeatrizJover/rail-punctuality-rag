@@ -43,7 +43,8 @@ POLICY = SqlPolicy(
 
 REPO_RETRIEVAL_CONFIG = Path(__file__).resolve().parents[1] / "config" / "retrieval_config.yaml"
 
-STATION_KEY = "a" * 32
+STATION_KEY = 220
+STOP_POINT_KEY = "a" * 32
 RELATION_KEY = "c" * 32
 FIRST_DAY = dt.date(2025, 8, 1)
 LAST_DAY = dt.date(2025, 8, 3)
@@ -76,11 +77,13 @@ def narrow_data(clean_schema: Engine) -> Engine:
                 {
                     "station_key": STATION_KEY,
                     "station_name": "Bruxelles-Midi",
+                    "is_passenger": True,
                     "observed_stop_events": 900,
                 },
                 {
-                    "station_key": "b" * 32,
+                    "station_key": 455,
                     "station_name": "Gent-Sint-Pieters",
+                    "is_passenger": True,
                     "observed_stop_events": 400,
                 },
             ],
@@ -95,6 +98,7 @@ def narrow_data(clean_schema: Engine) -> Engine:
                 {
                     "date_key": day,
                     "station_key": STATION_KEY,
+                    "stop_point_key": STOP_POINT_KEY,
                     "relation_key": RELATION_KEY,
                     "train_no": 1000 + index,
                     "planned_hour": 8,
@@ -197,6 +201,7 @@ def _add_fact_day(engine: Engine, day: dt.date) -> None:
                 {
                     "date_key": day,
                     "station_key": STATION_KEY,
+                    "stop_point_key": STOP_POINT_KEY,
                     "relation_key": RELATION_KEY,
                     "train_no": 1,
                     "planned_hour": 8,

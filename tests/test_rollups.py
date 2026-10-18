@@ -45,7 +45,9 @@ POLICY = SqlPolicy(
 )
 REPO_RETRIEVAL_CONFIG = Path(__file__).resolve().parents[1] / "config" / "retrieval_config.yaml"
 
-STATIONS = ["a" * 32, "b" * 32, "c" * 32]
+STATIONS = [101, 102, 103]
+# Station 101 holds two stop points, so its rollup row sums both.
+STOP_POINTS = [("a" * 32, 101), ("b" * 32, 102), ("c" * 32, 103), ("f" * 32, 101)]
 RELATIONS = ["d" * 32, "e" * 32]
 DAYS = [dt.date(2024, 12, 30), dt.date(2024, 12, 31), dt.date(2025, 1, 1), dt.date(2025, 1, 2)]
 MEASURES = ("stop_events", "measured_arrivals", "punctual_arrivals")
@@ -69,13 +71,14 @@ def _fact_rows(days: list[dt.date]) -> list[dict[str, Any]]:
     """Several trains per station and day, with unmeasured arrivals and weighted events."""
     rows = []
     for day_index, day in enumerate(days):
-        for station_index, station in enumerate(STATIONS):
+        for station_index, (stop_point, station) in enumerate(STOP_POINTS):
             for train in range(1, 4):
                 punctual = [1, 0, None][(day_index + station_index + train) % 3]
                 rows.append(
                     {
                         "date_key": day,
                         "station_key": station,
+                        "stop_point_key": stop_point,
                         "relation_key": RELATIONS[(station_index + train) % 2],
                         "train_no": train,
                         "planned_hour": 8,
@@ -97,7 +100,10 @@ def _load(engine: Engine, days: list[dt.date]) -> None:
         if not known:
             conn.execute(
                 dim_station.insert(),
-                [{"station_key": key, "station_name": f"station {key[0]}"} for key in STATIONS],
+                [
+                    {"station_key": key, "station_name": f"station {key}", "is_passenger": True}
+                    for key in STATIONS
+                ],
             )
             conn.execute(
                 dim_relation.insert(),

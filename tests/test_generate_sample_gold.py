@@ -50,10 +50,10 @@ def test_generated_fact_keys_all_resolve(tmp_path: Path) -> None:
 
 
 def test_generated_natural_key_is_unique(tmp_path: Path) -> None:
-    """(date_key, station_key, train_no) must not collide, matching the fact's index."""
+    """(date_key, stop_point_key, train_no) must not collide, matching the fact's index."""
     generate(tmp_path, stations=10, days=3)
     fact = list(read_fact_stop_event(tmp_path / "fact_stop_event.parquet"))
-    keys = [(r.date_key, r.station_key, r.train_no) for r in fact]
+    keys = [(r.date_key, r.stop_point_key, r.train_no) for r in fact]
     assert len(keys) == len(set(keys))
 
 
@@ -68,10 +68,38 @@ def test_generation_is_deterministic(tmp_path: Path) -> None:
     assert (a / MANIFEST_PATH).read_bytes() == (b / MANIFEST_PATH).read_bytes()
 
 
-def test_generated_data_includes_null_ptcar_no(tmp_path: Path) -> None:
+def test_generated_data_includes_the_unresolved_station(tmp_path: Path) -> None:
+    """Exported with no fact rows, as upstream does while every alias resolves."""
     generate(tmp_path, stations=10, days=1)
     stations = list(read_dim_station(tmp_path / "dim_station.parquet"))
-    assert any(s.ptcar_no is None for s in stations)
+    fact = list(read_fact_stop_event(tmp_path / "fact_stop_event.parquet"))
+    sentinel = [s for s in stations if s.station_key == -1]
+    assert [(s.station_name, s.ptcar_no, s.is_passenger) for s in sentinel] == [
+        ("Unresolved", None, False)
+    ]
+    assert all(r.station_key != -1 for r in fact)
+
+
+def test_generated_stations_are_keyed_by_ptcar_no(tmp_path: Path) -> None:
+    generate(tmp_path, stations=10, days=1)
+    stations = list(read_dim_station(tmp_path / "dim_station.parquet"))
+    assert all(s.station_key == s.ptcar_no for s in stations if s.station_key != -1)
+
+
+def test_generated_data_includes_a_station_with_two_stop_points(tmp_path: Path) -> None:
+    """The v2 grain case: one PTCAR_NO measured by two stop points on the same day."""
+    generate(tmp_path, stations=10, days=1)
+    fact = list(read_fact_stop_event(tmp_path / "fact_stop_event.parquet"))
+    stop_points: dict[int, set[str]] = {}
+    for row in fact:
+        stop_points.setdefault(row.station_key, set()).add(row.stop_point_key)
+    assert any(len(keys) == 2 for keys in stop_points.values())
+
+
+def test_generated_data_includes_a_station_without_coordinates(tmp_path: Path) -> None:
+    generate(tmp_path, stations=10, days=1)
+    stations = list(read_dim_station(tmp_path / "dim_station.parquet"))
+    assert any(s.station_key != -1 and s.latitude is None for s in stations)
 
 
 def test_generated_data_includes_null_relation_direction(tmp_path: Path) -> None:

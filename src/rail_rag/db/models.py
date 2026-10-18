@@ -16,6 +16,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    Double,
     ForeignKeyConstraint,
     Identity,
     Index,
@@ -35,8 +36,11 @@ from sqlalchemy.types import TypeEngine
 #: RAG-side tables (embeddings, chat traces) living in ``public``.
 GOLD_SCHEMA = "gold"
 
-#: MD5 hex digest length, used by ``station_key`` and ``relation_key``.
+#: MD5 hex digest length, used by ``stop_point_key`` and ``relation_key``.
 _HASH_LEN = 32
+
+#: ``station_key`` of the stop points upstream could not resolve to a ``PTCAR_NO``.
+UNRESOLVED_STATION_KEY = -1
 
 metadata = MetaData(schema=GOLD_SCHEMA)
 
@@ -62,14 +66,21 @@ dim_date = Table(
 dim_station = Table(
     "dim_station",
     metadata,
-    Column("station_key", String(_HASH_LEN), primary_key=True),
-    Column("station_name", String(128), nullable=True),
+    Column("station_key", Integer, primary_key=True, autoincrement=False),
+    Column("station_name", String(128), nullable=False),
     Column("ptcar_no", Integer, nullable=True),
     Column("observed_stop_events", BigInteger, nullable=True),
     Column("first_seen", Date, nullable=True),
     Column("last_seen", Date, nullable=True),
+    Column("station_type", String(64), nullable=True),
+    Column("is_passenger", Boolean, nullable=False),
+    Column("latitude", Double, nullable=True),
+    Column("longitude", Double, nullable=True),
     Column("loaded_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    comment="Measuring point identity, keyed by MD5 of the normalized name.",
+    comment=(
+        "Station identity, keyed by Infrabel's PTCAR_NO. station_key -1 ('Unresolved') "
+        "holds the stop points without a PTCAR_NO."
+    ),
 )
 
 dim_relation = Table(
@@ -90,7 +101,8 @@ dim_relation = Table(
 
 _SOURCE_FACT_COLUMNS: tuple[tuple[str, type[TypeEngine[Any]] | TypeEngine[Any]], ...] = (
     ("date_key", Date),
-    ("station_key", String(_HASH_LEN)),
+    ("station_key", Integer),
+    ("stop_point_key", String(_HASH_LEN)),
     ("relation_key", String(_HASH_LEN)),
     ("train_no", Integer),
     ("planned_hour", SmallInteger),
@@ -102,7 +114,7 @@ _SOURCE_FACT_COLUMNS: tuple[tuple[str, type[TypeEngine[Any]] | TypeEngine[Any]],
 )
 
 _REQUIRED_SOURCE_COLUMNS = frozenset(
-    {"date_key", "station_key", "relation_key", "train_no", "stop_events"}
+    {"date_key", "station_key", "stop_point_key", "relation_key", "train_no", "stop_events"}
 )
 
 
@@ -122,7 +134,7 @@ fact_stop_event = Table(
     *_source_columns(permissive=False),
     Column("measured_arrivals", SmallInteger, nullable=False),
     Column("loaded_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    Index(None, "date_key", "station_key", "train_no", unique=True),
+    Index(None, "date_key", "stop_point_key", "train_no", unique=True),
     Index(
         "ix_fact_stop_event_station_covering",
         "station_key",
@@ -145,7 +157,9 @@ fact_stop_event = Table(
         name="ck_fact_measured_arrivals_matches_punctual",
     ),
     comment=(
-        "Grain: one train passing one measuring point on one service date. "
+        "Grain: one train passing one measuring point (stop_point_key) on one service "
+        "date. station_key is the measuring point's station; a station can hold "
+        "several measuring points. "
         "Additive measures: stop_events, measured_arrivals, punctual_arrivals. "
         "Punctuality rate = SUM(punctual_arrivals) / SUM(measured_arrivals)."
     ),
@@ -165,15 +179,18 @@ stg_fact_stop_event = Table(
 )
 
 
-def _rollup_columns(key_column: str, key_comment: str) -> list[Column[Any]]:
+def _rollup_columns(
+    key_column: str, key_type: TypeEngine[Any], key_comment: str
+) -> list[Column[Any]]:
     return [
         Column(
             "date_key", Date, primary_key=True, comment="Service date; same value as the fact's."
         ),
         Column(
             key_column,
-            String(_HASH_LEN),
+            key_type,
             primary_key=True,
+            autoincrement=False,
             comment=key_comment,
         ),
         Column(
@@ -198,10 +215,10 @@ def _rollup_columns(key_column: str, key_comment: str) -> list[Column[Any]]:
 agg_station_day = Table(
     "agg_station_day",
     metadata,
-    *_rollup_columns("station_key", "Measuring point, as in the fact."),
+    *_rollup_columns("station_key", Integer(), "Station, as in the fact."),
     Index("ix_agg_station_day_station", "station_key"),
     comment=(
-        "Grain: one measuring point on one service date. Every measure is the exact "
+        "Grain: one station on one service date. Every measure is the exact "
         "daily sum of fact_stop_event over that grain, so SUM over any set of rows "
         "equals the same SUM on the fact. Network totals are sums over this table. "
         "Punctuality rate = SUM(punctual_arrivals) / SUM(measured_arrivals)."
@@ -212,7 +229,9 @@ agg_station_day = Table(
 agg_relation_day = Table(
     "agg_relation_day",
     metadata,
-    *_rollup_columns("relation_key", "Relation, direction and operator, as in the fact."),
+    *_rollup_columns(
+        "relation_key", String(_HASH_LEN), "Relation, direction and operator, as in the fact."
+    ),
     Index("ix_agg_relation_day_relation", "relation_key"),
     comment=(
         "Grain: one relation (with its direction and operator) on one service date. "

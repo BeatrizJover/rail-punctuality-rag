@@ -42,8 +42,8 @@ def seeded(clean_schema: Engine) -> Engine:
         conn.execute(
             dim_station.insert(),
             [
-                {"station_key": "a" * 32, "station_name": "Bruxelles-Midi"},
-                {"station_key": "b" * 32, "station_name": "Gent-Sint-Pieters"},
+                {"station_key": 220, "station_name": "Bruxelles-Midi", "is_passenger": True},
+                {"station_key": 455, "station_name": "Gent-Sint-Pieters", "is_passenger": True},
             ],
         )
     return clean_schema
