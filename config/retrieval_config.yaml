@@ -35,7 +35,9 @@ sql:
     - set_config
     - pg_reload_conf
 
-# Observation only: nothing here rejects or rewrites a query.
+# Nothing here rewrites a query; only max_plan_cost can reject one.
 sql_checks:
   # EXPLAIN (planning only) before execution; records cost, rows and partitions scanned.
   explain: true
+  # Provisional (E2-8): a one-year fact scan by hour plans ~0.67M, the full period ~1.81M.
+  max_plan_cost: 1000000

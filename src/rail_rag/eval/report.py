@@ -193,6 +193,11 @@ def _headline(counted: list[Record], cases: dict[str, Record]) -> Record:
         "partitions_total": max(totals) if totals else None,
         "near_timeout": _executes_with(counted, "near_timeout"),
         "timed_out": _executes_with(counted, "timed_out"),
+        "cost_rejected": sum(
+            1
+            for r in checked
+            if (_span(r, "sql_checks") or {}).get("attributes", {}).get("cost_rejected")
+        ),
         "errors_by_class": dict(errors),
     }
 
@@ -404,6 +409,7 @@ def _headline_section(h: Record) -> list[str]:
         ),
         ("Completed near timeout", h["near_timeout"]),
         ("Timed out", h["timed_out"]),
+        ("Rejected by cost", h["cost_rejected"]),
         ("Errors by class", _attrs(h["errors_by_class"]) or "none"),
     ]
     note = h["excluded_known_limitations"]

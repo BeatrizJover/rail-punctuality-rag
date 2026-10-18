@@ -34,3 +34,16 @@ class QueryExecutionError(RagError):
 
 class AnswerError(RagError):
     """Raised when the pipeline cannot produce an answer it is willing to stand behind."""
+
+
+class QueryTooExpensiveError(AnswerError):
+    """Raised when the planner's estimate exceeds the cost ceiling; nothing was executed."""
+
+    def __init__(self, estimated_cost: float, ceiling: float) -> None:
+        super().__init__(
+            "This question is too heavy to answer at this level of detail"
+            f" (estimated cost {estimated_cost:,.0f}, limit {ceiling:,.0f})."
+            " Try a shorter period or a coarser breakdown."
+        )
+        self.estimated_cost = estimated_cost
+        self.ceiling = ceiling
