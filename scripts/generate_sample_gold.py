@@ -11,7 +11,9 @@ It deliberately reproduces the shapes the contracts have to tolerate:
     but a present ``delay_dep_s`` - an arrival that was never measured;
   * a relation row with a null ``relation_direction`` - the upstream ``concat_ws``
     case;
-  * a null ``ptcar_no`` on some stations - the daily-feed-only rows.
+  * the unresolved station ``-1``, exported with no fact rows, as upstream does today;
+  * two stop points sharing one station, and a station no stop point uses;
+  * a resolved station with no type and no coordinates.
 
 It also writes ``_manifest/coverage.json``, as the lakehouse export does, so the
 loader's coverage gate accepts the sample. The generator refuses to write into a
@@ -31,13 +33,16 @@ import hashlib
 import logging
 import random
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from rail_rag.core.logging import configure_logging
+from rail_rag.db.models import UNRESOLVED_STATION_KEY
 from rail_rag.ingestion.fact_source import FACT_DIRNAME
 from rail_rag.ingestion.manifest import (
+    CONTRACT_VERSION,
     MANIFEST_PATH,
     CoverageManifest,
     FactCoverage,
@@ -49,6 +54,8 @@ logger = logging.getLogger("rail_rag.generate_sample_gold")
 _SEED = 20260826
 _OPERATORS = ("SNCB/NMBS", "SNCF", "DB", "NS")
 _RELATION_NAMES = ("IC 01", "IC 09", "S53", "S52", "THAL", "ICE", "P")
+_STATION_TYPES = ("Station", "Stop in open track", "Service installation")
+_PASSENGER_TYPES = frozenset({"Station", "Stop in open track"})
 _MONTHS = (
     "January",
     "February",
@@ -109,34 +116,61 @@ def _build_dim_date(days: list[dt.date]) -> pa.Table:
 
 
 def _build_dim_station(rng: random.Random, count: int, days: list[dt.date]) -> pa.Table:
-    """Stations keyed by MD5 of the name; ~1 in 5 has a null ptcar_no."""
-    rows = []
+    """``count`` stations keyed by their PTCAR_NO, plus the unresolved row ``-1``."""
+    rows: list[dict[str, Any]] = [
+        {
+            "station_key": UNRESOLVED_STATION_KEY,
+            "station_name": "Unresolved",
+            "ptcar_no": None,
+            "first_seen": None,
+            "last_seen": None,
+            "station_type": None,
+            "is_passenger": False,
+            "latitude": None,
+            "longitude": None,
+        }
+    ]
     for i in range(count):
-        name = f"STATION-{i:03d}"
+        station_type = _STATION_TYPES[i % len(_STATION_TYPES)]
+        # The second station mirrors the resolved rows upstream has no reference data for.
+        located = i != 1
         rows.append(
             {
-                "station_key": _md5(name),
-                "station_name": name,
-                # Null on roughly a fifth: the daily feed carries no ptcar_no.
-                "ptcar_no": None if i % 5 == 0 else 100 + i,
-                "observed_stop_events": rng.randint(50, 4000),
-                "first_seen": days[0],
+                "station_key": 100 + i,
+                "station_name": f"STATION-{i:03d}",
+                "ptcar_no": 100 + i,
+                # Alias-derived upstream, so the span is wider than the fact window.
+                "first_seen": days[0] - dt.timedelta(days=rng.randint(30, 900)),
                 "last_seen": days[-1],
+                "station_type": station_type if located else None,
+                "is_passenger": station_type in _PASSENGER_TYPES,
+                "latitude": round(rng.uniform(49.5, 51.5), 6) if located else None,
+                "longitude": round(rng.uniform(2.5, 6.4), 6) if located else None,
             }
         )
     return pa.Table.from_pylist(
         rows,
         schema=pa.schema(
             [
-                ("station_key", pa.string()),
+                ("station_key", pa.int32()),
                 ("station_name", pa.string()),
                 ("ptcar_no", pa.int32()),
-                ("observed_stop_events", pa.int64()),
                 ("first_seen", pa.date32()),
                 ("last_seen", pa.date32()),
+                ("station_type", pa.string()),
+                ("is_passenger", pa.bool_()),
+                ("latitude", pa.float64()),
+                ("longitude", pa.float64()),
             ]
         ),
     )
+
+
+def _stop_points(station_keys: list[int]) -> list[tuple[str, int]]:
+    """One stop point per resolved station, except the last, which shares the first's PTCAR."""
+    resolved = [key for key in station_keys if key != UNRESOLVED_STATION_KEY]
+    stations = resolved[:-1] + resolved[:1] if len(resolved) > 1 else resolved
+    return [(_md5(f"STOP POINT {i:03d}"), key) for i, key in enumerate(stations)]
 
 
 def _build_dim_relation(rng: random.Random) -> pa.Table:
@@ -171,19 +205,19 @@ def _build_dim_relation(rng: random.Random) -> pa.Table:
 def _build_fact(
     rng: random.Random,
     days: list[dt.date],
-    station_keys: list[str],
+    stop_points: list[tuple[str, int]],
     relation_keys: list[str],
 ) -> pa.Table:
     """Fact rows that reference only existing dimension keys.
 
-    ``train_no`` is unique per (date, station) so the natural key never collides
-    within a batch. Roughly 1 in 6 rows models an unmeasured arrival: null
+    One row per stop point per day, so the natural key never collides within a
+    batch. Roughly 1 in 6 rows models an unmeasured arrival: null
     ``planned_hour`` / ``delay_arr_s`` / ``punctual_arrivals`` with a present
     ``delay_dep_s``.
     """
     rows = []
     for d in days:
-        for station_key in station_keys:
+        for stop_point_key, station_key in stop_points:
             train_no = rng.randint(1, 9999)
             relation_key = rng.choice(relation_keys)
             unmeasured = rng.random() < 1 / 6
@@ -199,6 +233,7 @@ def _build_fact(
                 {
                     "date_key": d,
                     "station_key": station_key,
+                    "stop_point_key": stop_point_key,
                     "relation_key": relation_key,
                     "train_no": train_no,
                     "planned_hour": planned_hour,
@@ -214,7 +249,8 @@ def _build_fact(
         schema=pa.schema(
             [
                 ("date_key", pa.date32()),
-                ("station_key", pa.string()),
+                ("station_key", pa.int32()),
+                ("stop_point_key", pa.string()),
                 ("relation_key", pa.string()),
                 ("train_no", pa.int32()),
                 ("planned_hour", pa.int16()),
@@ -236,6 +272,7 @@ def _build_manifest(tables: dict[str, pa.Table], service_days: list[dt.date]) ->
     for day in dates:
         rows_per_year[str(day.year)] = rows_per_year.get(str(day.year), 0) + 1
     return CoverageManifest(
+        contract_version=CONTRACT_VERSION,
         exported_at=dt.datetime.combine(service_days[-1], dt.time(), tzinfo=dt.UTC),
         requested_range=RequestedRange(start=service_days[0], end=service_days[-1]),
         fact_stop_event=FactCoverage(
@@ -265,7 +302,7 @@ def generate(out_dir: Path, *, stations: int, days: int) -> dict[str, int]:
     fact = _build_fact(
         rng,
         service_days,
-        dim_station.column("station_key").to_pylist(),
+        _stop_points(dim_station.column("station_key").to_pylist()),
         dim_relation.column("relation_key").to_pylist(),
     )
 

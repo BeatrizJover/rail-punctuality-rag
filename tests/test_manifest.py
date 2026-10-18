@@ -21,15 +21,16 @@ from rail_rag.ingestion.manifest import (
 
 # Copy of a real export manifest; gold_export/ is gitignored.
 _REAL_PAYLOAD: dict[str, Any] = {
-    "exported_at": "2026-09-09T05:50:19.018546+00:00",
-    "requested_range": {"start": "2024-01-01", "end": "2026-12-31"},
+    "contract_version": 2,
+    "exported_at": "2026-10-18T10:53:37.166150+00:00",
+    "requested_range": {"start": "2024-01-01", "end": "2026-09-07"},
     "fact_stop_event": {
         "min_date_key": "2024-01-01",
         "max_date_key": "2026-09-07",
-        "total_rows": 60950122,
-        "rows_per_year": {"2024": 23114440, "2025": 22426978, "2026": 15408704},
+        "total_rows": 61828374,
+        "rows_per_year": {"2024": 23114440, "2025": 22426978, "2026": 16286956},
     },
-    "dimensions": {"dim_date": 5113, "dim_station": 701, "dim_relation": 566},
+    "dimensions": {"dim_date": 5113, "dim_station": 701, "dim_relation": 569},
     "layout": {
         "fact_stop_event": "fact_stop_event/date_key=YYYY-MM-DD/*.parquet",
         "dim_date": "dim_date/*.parquet",
@@ -61,14 +62,17 @@ def test_a_real_manifest_parses_into_typed_values(tmp_path: Path) -> None:
 
     assert manifest.fact_stop_event.min_date_key == dt.date(2024, 1, 1)
     assert manifest.fact_stop_event.max_date_key == dt.date(2026, 9, 7)
-    assert manifest.fact_stop_event.total_rows == 60950122
-    assert manifest.dimensions == {"dim_date": 5113, "dim_station": 701, "dim_relation": 566}
-    assert manifest.requested_range.end == dt.date(2026, 12, 31)
+    assert manifest.contract_version == 2
+    assert manifest.fact_stop_event.total_rows == 61828374
+    assert manifest.dimensions == {"dim_date": 5113, "dim_station": 701, "dim_relation": 569}
+    assert manifest.requested_range.end == dt.date(2026, 9, 7)
 
 
 def test_the_declared_span_is_narrower_than_the_requested_one(tmp_path: Path) -> None:
     """Declared span stops before the requested end."""
-    manifest = read_manifest(_write_manifest(tmp_path / "gold_export", _REAL_PAYLOAD))
+    payload = deepcopy(_REAL_PAYLOAD)
+    payload["requested_range"]["end"] = "2026-12-31"
+    manifest = read_manifest(_write_manifest(tmp_path / "gold_export", payload))
 
     assert manifest.fact_stop_event.max_date_key < manifest.requested_range.end
 
@@ -80,7 +84,7 @@ def test_an_unknown_field_is_ignored(tmp_path: Path) -> None:
 
     manifest = read_manifest(_write_manifest(tmp_path / "gold_export", payload))
 
-    assert manifest.fact_stop_event.total_rows == 60950122
+    assert manifest.fact_stop_event.total_rows == 61828374
 
 
 def test_the_description_names_the_span_and_the_volume(tmp_path: Path) -> None:
@@ -88,8 +92,9 @@ def test_the_description_names_the_span_and_the_volume(tmp_path: Path) -> None:
 
     description = manifest.describe()
 
+    assert "contract v2" in description
     assert "2024-01-01..2026-09-07" in description
-    assert "60,950,122" in description
+    assert "61,828,374" in description
     assert "dim_station 701" in description
 
 
@@ -120,6 +125,7 @@ def test_corrupt_json_is_a_loud_error(tmp_path: Path) -> None:
         ("max_date_key", "fact_stop_event"),
         ("dimensions", None),
         ("exported_at", None),
+        ("contract_version", None),
     ],
 )
 def test_a_missing_required_field_is_a_loud_error(
@@ -128,6 +134,17 @@ def test_a_missing_required_field_is_a_loud_error(
     source_dir = _write_manifest(tmp_path / "gold_export", _payload_without(key, section=section))
 
     with pytest.raises(IngestionError, match="is invalid"):
+        read_manifest(source_dir)
+
+
+@pytest.mark.parametrize("version", [1, 3])
+def test_another_contract_version_is_a_loud_error(tmp_path: Path, version: int) -> None:
+    """A v1 export must not load through a v2 schema, nor a future one through this code."""
+    payload = deepcopy(_REAL_PAYLOAD)
+    payload["contract_version"] = version
+    source_dir = _write_manifest(tmp_path / "gold_export", payload)
+
+    with pytest.raises(IngestionError, match=f"contract_version {version} is not supported"):
         read_manifest(source_dir)
 
 
@@ -166,7 +183,7 @@ def test_dimension_counts_matching_the_manifest_pass() -> None:
     results = {
         "dim_date": LoadCounts(rows_read=5113, rows_inserted=5113),
         "dim_station": LoadCounts(rows_read=701, rows_inserted=701),
-        "dim_relation": LoadCounts(rows_read=566, rows_inserted=566),
+        "dim_relation": LoadCounts(rows_read=569, rows_inserted=569),
     }
 
     assert_dimension_counts(_manifest(), results)
@@ -215,15 +232,15 @@ def test_every_mismatching_dimension_is_reported() -> None:
 def test_a_full_load_matching_total_rows_passes() -> None:
     assert_fact_coverage(
         _manifest(),
-        loaded_rows=60950122,
-        on_disk_rows=60950122,
+        loaded_rows=61828374,
+        on_disk_rows=61828374,
         range_start=None,
         range_end=None,
     )
 
 
 def test_a_full_load_short_of_total_rows_fails() -> None:
-    with pytest.raises(IngestionError, match="manifest declares 60950122"):
+    with pytest.raises(IngestionError, match="manifest declares 61828374"):
         assert_fact_coverage(
             _manifest(),
             loaded_rows=60_000_000,

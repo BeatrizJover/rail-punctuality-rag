@@ -5,8 +5,9 @@ and the typed load into PostgreSQL: a row that does not satisfy its contract nev
 reaches staging, and the failure names the table, the row and the offending field.
 
 The contracts encode the nullability the *real* Gold sample exhibits, not a guess.
-``ptcar_no`` and ``relation_direction`` are nullable because production rows leave
-them empty; the fact's keys and ``stop_events`` are required because every sampled
+``relation_direction`` is nullable because production rows leave it empty, and
+``ptcar_no`` because the unresolved station has none; the fact's keys and
+``stop_events`` are required because every sampled
 row carries them. ``measured_arrivals`` is absent on purpose: it is derived in SQL
 when the loader promotes staging into the fact, and never travels through Python.
 
@@ -20,6 +21,8 @@ from __future__ import annotations
 import datetime as dt
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from rail_rag.db.models import UNRESOLVED_STATION_KEY
 
 
 class _GoldRow(BaseModel):
@@ -49,18 +52,23 @@ class DimDateRow(_GoldRow):
 
 
 class DimStationRow(_GoldRow):
-    """A measuring point, keyed by MD5 of the normalized name.
+    """A station, keyed by its ``PTCAR_NO``, or ``-1`` for stop points not yet resolved.
 
-    ``ptcar_no`` is nullable: it only reaches Gold via the monthly export, so the
-    daily-driven rows legitimately lack it.
+    Only the unresolved row leaves ``ptcar_no``, the dates, the type and the
+    coordinates empty; a few resolved stations lack a type and coordinates too.
     """
 
-    station_key: str = Field(min_length=32, max_length=32)
-    station_name: str | None = None
+    station_key: int = Field(ge=UNRESOLVED_STATION_KEY, strict=True)
+    station_name: str
     ptcar_no: int | None = None
     observed_stop_events: int | None = Field(default=None, ge=0)
     first_seen: dt.date | None = None
     last_seen: dt.date | None = None
+    station_type: str | None = None
+    is_passenger: bool
+    # Schematic coordinates: fine for a map, not for distances.
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class DimRelationRow(_GoldRow):
@@ -88,7 +96,8 @@ class FactStopEventRow(_GoldRow):
     """
 
     date_key: dt.date
-    station_key: str = Field(min_length=32, max_length=32)
+    station_key: int = Field(ge=UNRESOLVED_STATION_KEY, strict=True)
+    stop_point_key: str = Field(min_length=32, max_length=32)
     relation_key: str = Field(min_length=32, max_length=32)
     train_no: int
     planned_hour: int | None = Field(default=None, ge=0, le=23)

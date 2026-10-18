@@ -20,8 +20,8 @@ _DIM_ROWS = (
     " (date_key, year, quarter, month, month_name, week_of_year, day_of_week,"
     "  day_name, is_weekend)"
     " VALUES ('2026-08-23', 2026, 3, 8, 'August', 34, 1, 'Sunday', true);"
-    f"INSERT INTO {GOLD_SCHEMA}.dim_station (station_key, station_name)"
-    " VALUES ('a' || repeat('0', 31), 'MOENSBERG');"
+    f"INSERT INTO {GOLD_SCHEMA}.dim_station (station_key, station_name, is_passenger)"
+    " VALUES (455, 'MOENSBERG', true);"
     f"INSERT INTO {GOLD_SCHEMA}.dim_relation (relation_key, relation)"
     " VALUES ('b' || repeat('0', 31), 'IC 01');"
 )
@@ -31,7 +31,8 @@ def _insert_fact(conn: object, **overrides: object) -> None:
     """Insert one fact row, with sane defaults for everything not overridden."""
     row: dict[str, object] = {
         "date_key": dt.date(2026, 8, 23),
-        "station_key": "a" + "0" * 31,
+        "station_key": 455,
+        "stop_point_key": "a" + "0" * 31,
         "relation_key": "b" + "0" * 31,
         "train_no": 501,
         "planned_hour": 7,
@@ -68,7 +69,7 @@ def test_orphan_fact_row_is_rejected(clean_schema: Engine) -> None:
     with clean_schema.begin() as conn:
         conn.execute(text(_DIM_ROWS))
     with pytest.raises(IntegrityError), clean_schema.begin() as conn:
-        _insert_fact(conn, station_key="c" + "0" * 31)
+        _insert_fact(conn, station_key=999)
 
 
 def test_negative_delays_are_accepted(clean_schema: Engine) -> None:
@@ -100,3 +101,16 @@ def test_duplicate_grain_is_rejected(clean_schema: Engine) -> None:
         _insert_fact(conn)
     with pytest.raises(IntegrityError), clean_schema.begin() as conn:
         _insert_fact(conn, delay_arr_s=999)
+
+
+def test_two_stop_points_of_one_station_share_a_train(clean_schema: Engine) -> None:
+    """The grain is the stop point: one PTCAR_NO can hold two of them on the same train."""
+    with clean_schema.begin() as conn:
+        conn.execute(text(_DIM_ROWS))
+        _insert_fact(conn)
+        _insert_fact(conn, stop_point_key="d" + "0" * 31)
+    with clean_schema.connect() as conn:
+        count = conn.execute(
+            text(f"SELECT count(*) FROM {GOLD_SCHEMA}.fact_stop_event WHERE station_key = 455")
+        ).scalar_one()
+    assert count == 2

@@ -23,7 +23,8 @@ _HASH = "0" * 32
 def _fact(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "date_key": dt.date(2026, 8, 23),
-        "station_key": _HASH,
+        "station_key": 1211,
+        "stop_point_key": _HASH,
         "relation_key": _HASH,
         "train_no": 42,
         "planned_hour": 8,
@@ -75,7 +76,25 @@ def test_fact_rejects_missing_required_key() -> None:
 
 def test_fact_rejects_short_hash_key() -> None:
     with pytest.raises(ValidationError):
-        FactStopEventRow.model_validate(_fact(station_key="tooshort"))
+        FactStopEventRow.model_validate(_fact(stop_point_key="tooshort"))
+
+
+def test_fact_rejects_missing_stop_point_key() -> None:
+    """stop_point_key is the fact's grain, so a row without it cannot be placed."""
+    payload = _fact()
+    del payload["stop_point_key"]
+    with pytest.raises(ValidationError):
+        FactStopEventRow.model_validate(payload)
+
+
+def test_fact_accepts_the_unresolved_station() -> None:
+    row = FactStopEventRow.model_validate(_fact(station_key=-1))
+    assert row.station_key == -1
+
+
+def test_fact_rejects_a_station_key_below_the_sentinel() -> None:
+    with pytest.raises(ValidationError):
+        FactStopEventRow.model_validate(_fact(station_key=-2))
 
 
 def test_fact_rejects_unexpected_column() -> None:
@@ -89,12 +108,51 @@ def test_measured_arrivals_is_not_part_of_the_contract() -> None:
     assert "measured_arrivals" not in FactStopEventRow.model_fields
 
 
-def test_station_allows_null_ptcar_no() -> None:
-    """ptcar_no only reaches Gold via the monthly export."""
+def test_station_accepts_the_unresolved_row() -> None:
+    """The sentinel carries only its key, its name and is_passenger."""
     row = DimStationRow.model_validate(
-        {"station_key": _HASH, "station_name": "MOENSBERG", "ptcar_no": None}
+        {"station_key": -1, "station_name": "Unresolved", "is_passenger": False}
     )
     assert row.ptcar_no is None
+    assert row.latitude is None
+
+
+def test_station_accepts_the_v2_attributes() -> None:
+    row = DimStationRow.model_validate(
+        {
+            "station_key": 455,
+            "station_name": "GENT-SINT-PIETERS",
+            "ptcar_no": 455,
+            "first_seen": dt.date(2014, 1, 1),
+            "last_seen": dt.date(2026, 9, 7),
+            "station_type": "Station",
+            "is_passenger": True,
+            "latitude": 51.036,
+            "longitude": 3.710,
+        }
+    )
+    assert row.station_key == 455
+    assert row.is_passenger is True
+
+
+@pytest.mark.parametrize("missing", ["station_name", "is_passenger"])
+def test_station_requires_its_non_null_attributes(missing: str) -> None:
+    payload: dict[str, object] = {
+        "station_key": 455,
+        "station_name": "GENT-SINT-PIETERS",
+        "is_passenger": True,
+    }
+    del payload[missing]
+    with pytest.raises(ValidationError):
+        DimStationRow.model_validate(payload)
+
+
+def test_station_rejects_a_hash_key() -> None:
+    """A v1 MD5 station_key must fail, not be coerced."""
+    with pytest.raises(ValidationError):
+        DimStationRow.model_validate(
+            {"station_key": _HASH, "station_name": "MOENSBERG", "is_passenger": True}
+        )
 
 
 def test_relation_allows_null_direction() -> None:

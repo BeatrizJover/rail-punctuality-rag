@@ -685,7 +685,8 @@ def test_a_stale_rollup_stops_the_pipeline_at_startup(
         )
         conn.execute(
             text(
-                "INSERT INTO gold.dim_station (station_key) VALUES (repeat('a', 32));"
+                "INSERT INTO gold.dim_station (station_key, station_name, is_passenger)"
+                " VALUES (220, 'BRUSSEL-ZUID', true);"
                 "INSERT INTO gold.dim_relation (relation_key) VALUES (repeat('b', 32))"
             )
         )
@@ -694,7 +695,8 @@ def test_a_stale_rollup_stops_the_pipeline_at_startup(
             [
                 {
                     "date_key": day,
-                    "station_key": "a" * 32,
+                    "station_key": 220,
+                    "stop_point_key": "a" * 32,
                     "relation_key": "b" * 32,
                     "train_no": 1,
                     "stop_events": 1,

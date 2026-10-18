@@ -72,7 +72,7 @@ def test_nullability_is_rendered() -> None:
 
 def test_unique_grain_is_rendered() -> None:
     rendered = render_schema(FULL_POLICY)
-    assert "UNIQUE: (date_key, station_key, train_no)" in rendered
+    assert "UNIQUE: (date_key, stop_point_key, train_no)" in rendered
 
 
 def test_check_constraints_are_rendered() -> None:

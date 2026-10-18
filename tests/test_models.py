@@ -5,7 +5,7 @@ the nullability the real export exhibits, and the invariants that protect the
 punctuality ratio.
 """
 
-from sqlalchemy import Table
+from sqlalchemy import Integer, String, Table
 
 from rail_rag.db.models import (
     GOLD_SCHEMA,
@@ -47,9 +47,19 @@ def test_fact_grain_is_unique_on_the_upstream_merge_key() -> None:
     assert len(unique_indexes) == 1
     assert [c.name for c in unique_indexes[0].columns] == [
         "date_key",
-        "station_key",
+        "stop_point_key",
         "train_no",
     ]
+
+
+def test_station_keys_are_ptcar_integers() -> None:
+    """v2 keys stations by PTCAR_NO; only stop points and relations stay MD5."""
+    assert isinstance(dim_station.c.station_key.type, Integer)
+    assert isinstance(fact_stop_event.c.station_key.type, Integer)
+    assert isinstance(agg_station_day.c.station_key.type, Integer)
+    assert isinstance(fact_stop_event.c.stop_point_key.type, String)
+    assert fact_stop_event.c.stop_point_key.type.length == 32
+    assert not fact_stop_event.c.stop_point_key.nullable
 
 
 def test_fact_declares_a_covering_station_index() -> None:

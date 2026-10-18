@@ -20,20 +20,21 @@ INSERT INTO {GOLD_SCHEMA}.dim_date
   (date_key, year, quarter, month, month_name, week_of_year, day_of_week, day_name, is_weekend)
 VALUES ('2026-08-23', 2026, 3, 8, 'August', 34, 7, 'Sunday', true),
        ('2026-08-24', 2026, 3, 8, 'August', 34, 1, 'Monday', false);
-INSERT INTO {GOLD_SCHEMA}.dim_station (station_key, station_name)
-VALUES (repeat('a', 32), 'Active-Two-Days'),
-       (repeat('b', 32), 'Active-One-Day'),
-       (repeat('c', 32), 'Never-Seen');
+INSERT INTO {GOLD_SCHEMA}.dim_station
+  (station_key, station_name, is_passenger, first_seen, last_seen)
+VALUES (101, 'Active-Two-Days', true, '2015-03-01', '2026-09-07'),
+       (102, 'Active-One-Day', true, '2019-06-10', '2026-09-07'),
+       (103, 'Never-Seen', false, '2014-01-01', '2020-12-31');
 INSERT INTO {GOLD_SCHEMA}.dim_relation (relation_key) VALUES (repeat('r', 32));
 """
 
 _FACT = f"""
 INSERT INTO {GOLD_SCHEMA}.fact_stop_event
-  (date_key, station_key, relation_key, train_no, stop_events, measured_arrivals)
-VALUES ('2026-08-23', repeat('a', 32), repeat('r', 32), 1, 1, 0),
-       ('2026-08-23', repeat('a', 32), repeat('r', 32), 2, 1, 0),
-       ('2026-08-24', repeat('a', 32), repeat('r', 32), 3, 1, 0),
-       ('2026-08-23', repeat('b', 32), repeat('r', 32), 9, 1, 0);
+  (date_key, station_key, stop_point_key, relation_key, train_no, stop_events, measured_arrivals)
+VALUES ('2026-08-23', 101, repeat('a', 32), repeat('r', 32), 1, 1, 0),
+       ('2026-08-23', 101, repeat('d', 32), repeat('r', 32), 1, 1, 0),
+       ('2026-08-24', 101, repeat('a', 32), repeat('r', 32), 3, 1, 0),
+       ('2026-08-23', 102, repeat('b', 32), repeat('r', 32), 9, 1, 0);
 """
 
 
@@ -45,48 +46,42 @@ def seeded(clean_schema: Engine) -> Engine:
     return clean_schema
 
 
-def _station(engine: Engine, letter: str) -> tuple[int | None, dt.date | None, dt.date | None]:
+def _station(engine: Engine, key: int) -> tuple[int | None, dt.date | None, dt.date | None]:
     with engine.connect() as conn:
         row = conn.execute(
             text(
                 f"SELECT observed_stop_events, first_seen, last_seen FROM {GOLD_SCHEMA}.dim_station"
                 " WHERE station_key = :key"
             ),
-            {"key": letter * 32},
+            {"key": key},
         ).one()
     return row[0], row[1], row[2]
 
 
 def test_activity_sums_the_measure_not_the_days(seeded: Engine) -> None:
-    """observed_stop_events is SUM(stop_events): three events over two days is 3, not 2."""
+    """observed_stop_events is SUM(stop_events) over every stop point of the station."""
     derive_station_activity(seeded)
-    events, first, last = _station(seeded, "a")
+    events, _, _ = _station(seeded, 101)
     assert events == 3
-    assert first == dt.date(2026, 8, 23)
-    assert last == dt.date(2026, 8, 24)
 
 
-def test_a_one_day_station_spans_a_single_date(seeded: Engine) -> None:
+def test_the_exported_date_span_is_kept(seeded: Engine) -> None:
+    """Upstream derives first_seen/last_seen from the aliases; the fact must not narrow them."""
     derive_station_activity(seeded)
-    events, first, last = _station(seeded, "b")
-    assert events == 1
-    assert first == last == dt.date(2026, 8, 23)
+    assert _station(seeded, 102) == (1, dt.date(2019, 6, 10), dt.date(2026, 9, 7))
 
 
 def test_a_station_absent_from_the_fact_is_zero_not_null(seeded: Engine) -> None:
     """Zero observed events is a fact; NULL would read as unknown."""
     derive_station_activity(seeded)
-    events, first, last = _station(seeded, "c")
-    assert events == 0
-    assert first is None
-    assert last is None
+    assert _station(seeded, 103) == (0, dt.date(2014, 1, 1), dt.date(2020, 12, 31))
 
 
 def test_deriving_twice_is_stable(seeded: Engine) -> None:
     derive_station_activity(seeded)
-    first_pass = _station(seeded, "a")
+    first_pass = _station(seeded, 101)
     derive_station_activity(seeded)
-    assert _station(seeded, "a") == first_pass
+    assert _station(seeded, 101) == first_pass
 
 
 def test_integrity_holds_on_a_clean_load(seeded: Engine) -> None:
@@ -101,8 +96,9 @@ def test_integrity_catches_an_orphan_fact_row(seeded: Engine) -> None:
         conn.execute(
             text(
                 f"INSERT INTO {GOLD_SCHEMA}.fact_stop_event"
-                " (date_key, station_key, relation_key, train_no, stop_events, measured_arrivals)"
-                " VALUES ('2026-08-23', repeat('a', 32), repeat('z', 32), 77, 1, 0)"
+                " (date_key, station_key, stop_point_key, relation_key, train_no,"
+                " stop_events, measured_arrivals)"
+                " VALUES ('2026-08-23', 101, repeat('a', 32), repeat('z', 32), 77, 1, 0)"
             )
         )
         conn.execute(text("SET session_replication_role = DEFAULT"))
@@ -233,7 +229,7 @@ def test_optimize_lets_a_station_filter_skip_the_heap(seeded: Engine) -> None:
                     "EXPLAIN (VERBOSE, COSTS OFF)"
                     " SELECT SUM(f.stop_events)"
                     f" FROM {GOLD_SCHEMA}.fact_stop_event AS f"
-                    " WHERE f.station_key = repeat('a', 32)"
+                    " WHERE f.station_key = 101"
                 )
             ).scalars()
         )
