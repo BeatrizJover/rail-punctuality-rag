@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from rail_rag.core.exceptions import ConfigError
 from rail_rag.rag.exceptions import RagError, UnsafeQueryError
 from rail_rag.rag.sql.guard import validate_sql
 from rail_rag.rag.sql.policy import SqlPolicy, load_retrieval_config
@@ -58,7 +59,27 @@ def test_repo_config_enables_the_plan_check() -> None:
 def test_the_plan_check_is_off_when_the_section_is_absent(tmp_path: Path) -> None:
     config = tmp_path / "retrieval_config.yaml"
     config.write_text("sql:\n  allowed_tables: [gold.dim_date]\n", encoding="utf-8")
-    assert load_retrieval_config(config).sql_checks.explain is False
+    checks = load_retrieval_config(config).sql_checks
+    assert checks.explain is False
+    assert checks.max_plan_cost is None
+
+
+def test_repo_config_sets_the_cost_ceiling() -> None:
+    assert load_retrieval_config(REPO_CONFIG).sql_checks.max_plan_cost == 1_000_000
+
+
+@pytest.mark.parametrize(
+    "checks",
+    ["  max_plan_cost: 1000\n", "  explain: true\n  max_plan_cost: 0\n"],
+    ids=["ceiling-without-explain", "non-positive-ceiling"],
+)
+def test_an_invalid_cost_ceiling_is_a_config_error(tmp_path: Path, checks: str) -> None:
+    config = tmp_path / "retrieval_config.yaml"
+    config.write_text(
+        f"sql:\n  allowed_tables: [gold.dim_date]\nsql_checks:\n{checks}", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError):
+        load_retrieval_config(config)
 
 
 def test_realistic_analytical_query_is_accepted() -> None:

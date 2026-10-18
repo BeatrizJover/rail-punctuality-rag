@@ -24,7 +24,12 @@ from rail_rag.db.rollups import assert_rollups_fresh
 from rail_rag.observability import Trace, annotate, span, start_trace
 from rail_rag.rag.context import render_context
 from rail_rag.rag.context.profile import DataProfile, load_profile
-from rail_rag.rag.exceptions import AnswerError, QueryExecutionError, UnsafeQueryError
+from rail_rag.rag.exceptions import (
+    AnswerError,
+    QueryExecutionError,
+    QueryTooExpensiveError,
+    UnsafeQueryError,
+)
 from rail_rag.rag.prompts import (
     NO_SQL,
     Passage,
@@ -90,11 +95,13 @@ class AnswerPipeline:
         external_ids: Collection[str] = (),
         min_similarity: float = 0.0,
         explain_plans: bool = False,
+        max_plan_cost: float | None = None,
     ) -> None:
         self._engine = engine
         self._generator = generator
         self._policy = policy
         self._explain_plans = explain_plans
+        self._max_plan_cost = max_plan_cost
 
         with start_trace("startup"):
             with span("profile"):
@@ -250,7 +257,11 @@ class AnswerPipeline:
             return safe
 
     def _check_sql(self, safe: SafeQuery) -> None:
-        """Record lint findings and, when enabled, the plan estimate; never fails the answer."""
+        """Record lint findings and, when enabled, the plan estimate; only the cost ceiling fails.
+
+        Raises:
+            QueryTooExpensiveError: if the estimate exceeds ``max_plan_cost``.
+        """
         try:
             findings = lint_sql(safe.sql)
         except Exception as exc:
@@ -274,6 +285,9 @@ class AnswerPipeline:
                 partitions_scanned=estimate.partitions_scanned.get(_FACT_TABLE, 0),
                 partitions_total=self._partitions_total,
             )
+        if self._max_plan_cost is not None and estimate.total_cost > self._max_plan_cost:
+            annotate(cost_rejected=True)
+            raise QueryTooExpensiveError(estimate.total_cost, self._max_plan_cost)
 
     def _narrate(
         self,

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from rail_rag.core.exceptions import ConfigError
 
@@ -34,12 +34,20 @@ class SqlPolicy(BaseModel):
 
 
 class SqlChecksConfig(BaseModel):
-    """Observation-only checks run on validated SQL before it executes."""
+    """Checks run on validated SQL before it executes; only the cost ceiling can reject."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     #: Plans the query with ``EXPLAIN`` and records the estimate; never fails an answer.
     explain: bool = False
+    #: Planner cost above which the query is refused before execution; ``None`` disables it.
+    max_plan_cost: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _ceiling_needs_a_plan(self) -> SqlChecksConfig:
+        if self.max_plan_cost is not None and not self.explain:
+            raise ValueError("max_plan_cost requires explain: true")
+        return self
 
 
 class RetrievalConfig(BaseModel):

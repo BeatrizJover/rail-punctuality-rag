@@ -257,6 +257,22 @@ def test_timed_out_queries_are_counted_apart_from_near_timeout(tmp_path: Path) -
     assert "| Completed near timeout | 1 |" in rendered.markdown
 
 
+def test_cost_rejected_queries_are_counted(tmp_path: Path) -> None:
+    rejected = [
+        _span("route"),
+        _span("sql_checks", 3.0, lint=[], plan_total_cost=2e6, cost_rejected=True),
+    ]
+    results = [
+        _result("a", 10.0, rejected, outcome="error", error_class="QueryTooExpensiveError"),
+        _result("b", 10.0, [_span("route"), _span("sql_checks", 3.0, lint=[])]),
+    ]
+    cases = [_case(cid, "data", "q") for cid in "ab"]
+    rendered = render_report(*_write(tmp_path, results, _meta(case_ids=list("ab"), cases=cases)))
+
+    assert rendered.data["headline"]["cost_rejected"] == 1
+    assert "| Rejected by cost | 1 |" in rendered.markdown
+
+
 def test_the_timeout_rows_are_labelled_in_the_markdown(tmp_path: Path) -> None:
     markdown = _render(tmp_path).markdown
 

@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import Engine, text
 
 from rail_rag.observability import Span, capture_traces, start_trace
-from rail_rag.rag.exceptions import AnswerError, QueryExecutionError
+from rail_rag.rag.exceptions import AnswerError, QueryExecutionError, QueryTooExpensiveError
 from rail_rag.rag.pipeline import Answer, AnswerPipeline, Source, _parse_sql, _sources_from
 from rail_rag.rag.prompts import NO_SQL
 from rail_rag.rag.providers.fake import FakeEmbedder, FakeGenerator
@@ -107,6 +107,7 @@ def _build(
     external_ids: Collection[str] = (),
     min_similarity: float = 0.0,
     explain_plans: bool = False,
+    max_plan_cost: float | None = None,
 ) -> tuple[AnswerPipeline, FakeGenerator]:
     """Construct a pipeline against a live schema with a scripted generator."""
     generator = FakeGenerator(responses)
@@ -120,6 +121,7 @@ def _build(
         external_ids=external_ids,
         min_similarity=min_similarity,
         explain_plans=explain_plans,
+        max_plan_cost=max_plan_cost,
     )
     return pipeline, generator
 
@@ -760,6 +762,55 @@ def test_a_failing_plan_check_is_recorded_and_the_answer_completes(
     assert answer.trace.error_class is None
     assert _span(answer, "sql_checks").attributes == {"lint": [], "plan_error": "RuntimeError"}
     assert "narration" in _span_names(answer)
+
+
+@pytest.mark.integration
+def test_a_plan_over_the_cost_ceiling_is_refused_before_execution(
+    clean_schema: Engine, kb_schema: KbSchema
+) -> None:
+    pipeline, _ = _build(
+        clean_schema, kb_schema, [_PRUNED_SQL, "unused"], explain_plans=True, max_plan_cost=0.01
+    )
+    with capture_traces() as traces, pytest.raises(QueryTooExpensiveError) as caught:
+        pipeline.answer(_DATA_Q)
+
+    (trace,) = traces
+    names = [s.name for s in trace.spans]
+    (checks,) = [s for s in trace.spans if s.name == "sql_checks"]
+    assert "execute" not in names
+    assert checks.attributes["cost_rejected"] is True
+    assert caught.value.estimated_cost == checks.attributes["plan_total_cost"]
+    assert caught.value.ceiling == 0.01
+    assert isinstance(caught.value, AnswerError)
+    assert trace.error_class == "QueryTooExpensiveError"
+
+
+@pytest.mark.integration
+def test_a_plan_under_the_cost_ceiling_executes(clean_schema: Engine, kb_schema: KbSchema) -> None:
+    pipeline, _ = _build(
+        clean_schema, kb_schema, [_PRUNED_SQL, "ok"], explain_plans=True, max_plan_cost=1e12
+    )
+    answer = pipeline.answer(_DATA_Q)
+
+    assert "execute" in _span_names(answer)
+    assert "cost_rejected" not in _span(answer, "sql_checks").attributes
+
+
+@pytest.mark.integration
+def test_a_failing_plan_check_never_trips_the_cost_ceiling(
+    clean_schema: Engine, kb_schema: KbSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any) -> Any:
+        raise RuntimeError("planner exploded")
+
+    monkeypatch.setattr("rail_rag.rag.pipeline.explain_safe_query", broken)
+    pipeline, _ = _build(
+        clean_schema, kb_schema, [_GOOD_SQL, "ok"], explain_plans=True, max_plan_cost=0.01
+    )
+    answer = pipeline.answer(_DATA_Q)
+
+    assert "execute" in _span_names(answer)
+    assert _span(answer, "sql_checks").attributes == {"lint": [], "plan_error": "RuntimeError"}
 
 
 @pytest.mark.integration

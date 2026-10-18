@@ -85,6 +85,7 @@ def build_state(
         external_ids=external_ids,
         min_similarity=config.embedding.min_similarity,
         explain_plans=retrieval.sql_checks.explain,
+        max_plan_cost=retrieval.sql_checks.max_plan_cost,
     )
     logger.info(
         "Pipeline ready (provider=%s, generation=%s, embedding=%s, external sources=%d,"
