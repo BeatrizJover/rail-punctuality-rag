@@ -30,7 +30,7 @@ answered from the numbers.
 
 ## Why there is a knowledge base as well
 
-Not every question is about the data. "Why do some stations have no ptcar_no"
+Not every question is about the data. "What is the unresolved station"
 and "how is punctuality defined here" are questions about the *system*, and no
 SQL query answers them. These are answered from this documentation, retrieved by
 semantic similarity.

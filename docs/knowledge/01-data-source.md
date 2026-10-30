@@ -25,29 +25,44 @@ The **monthly export** is historical, appended rather than overwritten, and
 published with a lag. It **does** contain `PTCAR_NO`.
 
 `PTCAR_NO` is Infrabel's official, stable numeric identifier for a point of
-observation on the network. It is the natural candidate for station identity
-and would have made an ideal compact integer key.
+observation on the network, and it is what this service uses as station
+identity.
 
-## Why station identity is a hash, not the official ID
+## Stations and stop points
 
-Anchoring station identity to `PTCAR_NO` would have made daily ingestion depend
-on a monthly publication cycle. A pipeline that cannot run until a monthly file
-arrives is not a daily pipeline.
+The data distinguishes two identities.
 
-Station identity is therefore a deterministic surrogate: `station_key`, an MD5
-hash of the normalized, accent-stripped station name. It is reproducible from
-the daily feed alone.
+A **stop point** is a measuring point as the feeds name it. Its key,
+`stop_point_key`, is an MD5 hash of the normalized, accent-stripped name, so it
+can be computed from the daily feed alone. It never changes.
 
-`PTCAR_NO` was demoted from a join dependency to a nullable enrichment
-attribute, left-joined in from a monthly-derived crosswalk on the same
-normalized name.
+A **station** is a `PTCAR_NO`. Its key, `station_key`, is that number, and
+`dim_station` holds one row per `PTCAR_NO`. Each stop point is linked to its
+station by an alias table maintained upstream. Usually one stop point is one
+station; when two stop points share a `PTCAR_NO`, they are one station. Questions
+about stations are answered at station level.
 
-## Why ptcar_no is often null
+`station_name` is Infrabel's official Dutch long name for the `PTCAR_NO` when the
+reference data has it, otherwise the most recent name seen in the feeds.
 
-Because the daily feed does not carry it. This is expected behaviour, not a
-data quality failure, and the upstream pipeline deliberately tracks it as a
-coverage metric rather than as a pass/fail rule — a check on it would produce a
-permanently red signal with no action attached.
+## How a stop point gets its station
 
-Any query that filters on `ptcar_no IS NOT NULL` silently discards most of the
-network. It should never be used as a join key or a filter.
+The daily feed does not carry `PTCAR_NO`, so the daily pipeline cannot wait for
+it. Upstream resolves each stop point's `PTCAR_NO` from the monthly export, or
+from Infrabel's operational-points reference when the name matches exactly one
+point. A stop point that neither source resolves yet is assigned to the
+unresolved station until it does.
+
+When a stop point is resolved late or corrected, upstream re-points its rows to
+the right station. A `station_key` can therefore change for rows already loaded;
+a `stop_point_key` cannot.
+
+## The unresolved station
+
+`station_key = -1`, named `Unresolved`, collects the stop points that have no
+`PTCAR_NO` yet. It is always present in `dim_station`, and it is the only row
+where `ptcar_no`, the dates, the type and the coordinates are NULL. It currently
+carries no rows of the fact.
+
+Its stop events are real and count in network totals. It is not a place, though,
+so it is excluded from per-station rankings and comparisons.

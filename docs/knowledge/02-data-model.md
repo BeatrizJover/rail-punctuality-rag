@@ -14,14 +14,20 @@ reachable from here and cannot be queried.
 
 Three dimensions surround one fact table.
 
-`dim_date` is a generated calendar. `dim_station` holds measuring point
-identity, keyed by the MD5 surrogate described in the data source document.
+`dim_date` is a generated calendar. `dim_station` holds one row per station,
+keyed by its `PTCAR_NO` as described in the data source document, with the
+station's type, whether it serves passengers, and schematic coordinates.
 `dim_relation` holds the commercial relation, its direction and the operator,
 keyed by an MD5 of those three fields concatenated.
 
 `fact_stop_event` is the only fact table. Its grain is **one train passing one
 measuring point on one service date**, identified by the combination of
-`date_key`, `station_key` and `train_no`.
+`date_key`, `stop_point_key` and `train_no`. Each row also carries the
+`station_key` of the station its measuring point belongs to.
+
+Two daily rollups, `agg_station_day` and `agg_relation_day`, hold the exact daily
+sums of the fact by station and by relation, so most questions never scan the
+fact itself.
 
 ## Why the measures are counts, not percentages
 

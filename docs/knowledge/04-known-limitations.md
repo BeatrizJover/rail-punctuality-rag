@@ -17,11 +17,12 @@ Driving a report from `dim_date` with a left join to the fact is a specific trap
 dates with no data return NULL, and a NULL punctuality rate is easily read as
 zero punctuality rather than as absent data.
 
-## Surrogate keys are hashes and are not human readable
+## Keys are not human readable
 
-`station_key` and `relation_key` are MD5 digests. They are meaningless to a
-reader and must always be resolved to `station_name`, `relation`,
-`relation_direction` or `operator` by joining to the corresponding dimension.
+`station_key` is a numeric `PTCAR_NO`; `stop_point_key` and `relation_key` are
+MD5 digests. None of them means anything to a reader, so they must always be
+resolved to `station_name`, `relation`, `relation_direction` or `operator` by
+joining to the corresponding dimension.
 
 ## A latent hash collision risk upstream
 
@@ -34,9 +35,18 @@ This is tracked as a known defect in the upstream Gold layer. It has not been
 observed to cause a collision in the current data, but it is a real risk rather
 than a theoretical one.
 
-## Station names come from the daily feed
+## Station assignments can change
 
-Station identity is derived from the normalized station name. If the upstream
-feed changes how it spells a station, the derived key changes with it and the
-station appears as a new measuring point. Names should be treated as the values
-they are in the data, not as canonical official names.
+A stop point's station is resolved upstream and can be corrected later, so
+`station_key` can change for rows already loaded; figures by station can move
+slightly after such a correction. Stop points without a `PTCAR_NO` yet sit in the
+unresolved station until they are resolved.
+
+If a feed changes how it spells a measuring point, the new spelling becomes a
+new stop point. It stays in the same station once it resolves to the same
+`PTCAR_NO`.
+
+## Coordinates are schematic
+
+`latitude` and `longitude` in `dim_station` place a station on a map but are not
+precise enough to compute distances. A few stations have none.
