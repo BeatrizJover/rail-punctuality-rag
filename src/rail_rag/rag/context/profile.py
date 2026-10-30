@@ -25,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from rail_rag.core.exceptions import DatabaseError
 from rail_rag.db.models import (
     PROFILE_SNAPSHOT_ID,
+    UNRESOLVED_STATION_KEY,
     dim_date,
     dim_relation,
     dim_station,
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SAMPLE_SIZE = 12
 
 #: Bump when the measured queries change, so a stored profile is recomputed once.
-PROFILE_FORMAT_VERSION = 2
+PROFILE_FORMAT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ class DataProfile:
             "DATA COVERAGE (measured at startup, not inferred from the calendar)",
             f"- fact_stop_event: {self.fact_rows:,} rows,"
             f" {self.fact_distinct_days} distinct dates,"
-            f" {self.fact_distinct_stations} measuring points",
+            f" {self.fact_distinct_stations} stations",
             f"- Data available from {self.fact_min_date} to {self.fact_max_date}",
         ]
         if self.calendar_min_date and self.calendar_max_date:
@@ -261,6 +262,7 @@ def _measure(engine: Engine, *, sample_size: int) -> DataProfile:
             stations = conn.execute(
                 select(dim_station.c.station_name)
                 .where(dim_station.c.station_name.is_not(None))
+                .where(dim_station.c.station_key != UNRESOLVED_STATION_KEY)
                 .order_by(dim_station.c.observed_stop_events.desc().nulls_last())
                 .limit(sample_size)
             ).scalars()

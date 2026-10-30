@@ -32,20 +32,25 @@ PUNCTUALITY DEFINITION
 
 GRAIN
 - One row of fact_stop_event is one train passing one measuring point on one
-  service date, identified by (date_key, station_key, train_no).
+  service date, identified by (date_key, stop_point_key, train_no).
 - Counting rows is therefore counting stop events, not counting trains. Use
   COUNT(DISTINCT train_no) when the question is about trains.
+- A station (station_key) can hold several measuring points (stop_point_key).
+  Questions about stations group by station_key, never by stop_point_key.
 
 KEYS AND NAMES
-- station_key and relation_key are MD5 hashes and are meaningless to a reader.
-  Always join to dim_station or dim_relation and return the human-readable name.
-- ptcar_no is nullable by design: the daily feed does not carry it. Never filter
-  on ptcar_no IS NOT NULL, as that silently drops most of the network.
+- station_key is Infrabel's PTCAR_NO, an integer; stop_point_key and relation_key
+  are MD5 hashes. None of them means anything to a reader: always join to
+  dim_station or dim_relation and return the human-readable name.
+- station_key -1 is 'Unresolved': measuring points not yet matched to a station.
+  Count it in network totals, but exclude it (station_key <> -1) from per-station
+  rankings and comparisons.
 
 DAILY ROLLUPS
 - agg_station_day (date_key, station_key) and agg_relation_day (date_key, relation_key)
   hold exact daily sums of fact_stop_event: row_count, stop_events, measured_arrivals
-  and punctual_arrivals. Network totals are sums over agg_station_day.
+  and punctual_arrivals. Network totals are sums over all of agg_station_day,
+  station_key -1 included.
 - For punctuality rates and for stop_events or measured_arrivals counts, by station,
   relation or the whole network, at day, month or year level, query a rollup. Join
   dim_station or dim_relation only for names and labels, and to filter by name.
