@@ -149,6 +149,24 @@ def test_rendered_profile_names_the_gap(narrow_data: Engine) -> None:
     assert "2025-08-01 to 2025-08-03" in rendered
     assert "WIDER than the data" in rendered
     assert "no data behind it" in rendered
+    assert "1 stations" in rendered
+
+
+def test_the_unresolved_station_is_never_sampled(narrow_data: Engine) -> None:
+    """Teaching the model the name 'Unresolved' would invite it into a ranking."""
+    with narrow_data.begin() as conn:
+        conn.execute(
+            dim_station.insert(),
+            [
+                {
+                    "station_key": -1,
+                    "station_name": "Unresolved",
+                    "is_passenger": False,
+                    "observed_stop_events": 10_000,
+                }
+            ],
+        )
+    assert "Unresolved" not in load_profile(narrow_data).sample_stations
 
 
 def test_value_samples_teach_the_spelling(narrow_data: Engine) -> None:

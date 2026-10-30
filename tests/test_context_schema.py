@@ -63,7 +63,7 @@ def test_grain_and_ratio_reach_the_prompt_from_the_table_comment() -> None:
 
 
 def test_nullability_is_rendered() -> None:
-    """ptcar_no being nullable is load-bearing: filtering on it drops the network."""
+    """ptcar_no is NULL on the unresolved station, and the prompt must say so."""
     rendered = render_schema(FULL_POLICY)
     assert "ptcar_no" in rendered
     ptcar_line = next(line for line in rendered.splitlines() if "ptcar_no" in line)
@@ -102,6 +102,19 @@ def test_rules_warn_against_inferring_coverage_from_the_calendar() -> None:
     assert "Never infer the available period from dim_date" in _flat(SEMANTIC_RULES)
 
 
-def test_rules_protect_negative_delays_and_null_ptcar() -> None:
+def test_rules_protect_negative_delays() -> None:
     assert "Negative values are early arrivals" in _flat(SEMANTIC_RULES)
-    assert "Never filter on ptcar_no IS NOT NULL" in _flat(SEMANTIC_RULES)
+
+
+def test_rules_describe_the_v2_keys_and_grain() -> None:
+    rules = _flat(SEMANTIC_RULES)
+    assert "identified by (date_key, stop_point_key, train_no)" in rules
+    assert "station_key is Infrabel's PTCAR_NO, an integer" in rules
+    assert "group by station_key, never by stop_point_key" in rules
+    assert "ptcar_no IS NOT NULL" not in rules
+
+
+def test_rules_keep_the_unresolved_station_out_of_rankings_only() -> None:
+    rules = _flat(SEMANTIC_RULES)
+    assert "exclude it (station_key <> -1) from per-station rankings" in rules
+    assert "Count it in network totals" in rules

@@ -276,7 +276,7 @@ def test_the_prompt_carries_the_rollup_and_period_rules(loaded: Engine) -> None:
     system = _flat(build_sql_system(build_context(loaded, _exposed_policy())))
 
     assert "DAILY ROLLUPS" in system
-    assert "Network totals are sums over agg_station_day" in system
+    assert "Network totals are sums over all of agg_station_day, station_key -1 included" in system
     assert "Query fact_stop_event only for what the rollups cannot answer" in system
     assert "date_key >= DATE '2025-01-01' AND date_key < DATE '2026-01-01'" in system
     assert "Use dim_date only to output calendar attributes" in system
