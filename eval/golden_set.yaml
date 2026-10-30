@@ -78,6 +78,7 @@ cases:
       FROM gold.fact_stop_event f
       JOIN gold.dim_station s ON s.station_key = f.station_key
       WHERE f.date_key >= DATE '2025-03-01' AND f.date_key < DATE '2025-04-01'
+        AND f.station_key <> -1
       GROUP BY s.station_name
       HAVING SUM(f.measured_arrivals) >= 10000
       ORDER BY rate ASC, s.station_name
@@ -96,6 +97,7 @@ cases:
       FROM gold.fact_stop_event f
       JOIN gold.dim_station s ON s.station_key = f.station_key
       WHERE f.date_key >= DATE '2025-01-01' AND f.date_key < DATE '2026-01-01'
+        AND f.station_key <> -1
       GROUP BY s.station_name
       HAVING SUM(f.measured_arrivals) >= 100000
       ORDER BY rate DESC, s.station_name
@@ -218,12 +220,12 @@ cases:
     expected_sources:
       - {doc_id: 02-data-model, heading: "Why the measures are counts, not percentages"}
 
-  - id: concept_ptcar_no_null
-    question: Why is ptcar_no often null?
+  - id: concept_unresolved_station
+    question: What does the unresolved station mean?
     tags: [conceptual]
     expected_route: conceptual
     expected_sources:
-      - {doc_id: 01-data-source, heading: "Why ptcar_no is often null"}
+      - {doc_id: 01-data-source, heading: "The unresolved station"}
 
   - id: concept_train_path
     question: What is a train path?
